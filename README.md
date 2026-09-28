@@ -16,6 +16,10 @@ bun dev
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
+## Authentication setup
+
+Apply `database/schema.sql` to your PostgreSQL database, then configure `DATABASE_URL` and a long random `SESSION_SECRET` in the environment before deploying. Authentication uses PostgreSQL for durable accounts and signed, HTTP-only session cookies. In local development without `DATABASE_URL`, accounts are kept in memory and are cleared when the server restarts.
+
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
