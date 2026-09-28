@@ -9,6 +9,10 @@ export type Restaurant = {
   image: string;
   tag: string;
   featured: boolean;
+  latitude: number;
+  longitude: number;
+  offersDelivery: boolean;
+  offersDineIn: boolean;
 };
 
 export type MenuItem = {
@@ -36,6 +40,10 @@ export const restaurants: Restaurant[] = [
       'https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=900&q=80',
     tag: 'Super Saver',
     featured: true,
+    latitude: 40.7484,
+    longitude: -73.9857,
+    offersDelivery: true,
+    offersDineIn: true,
   },
   {
     id: 'r2',
@@ -49,6 +57,10 @@ export const restaurants: Restaurant[] = [
       'https://images.unsplash.com/photo-1552566626-52f8b828add9?auto=format&fit=crop&w=900&q=80',
     tag: 'Top Rated',
     featured: true,
+    latitude: 40.741,
+    longitude: -73.9897,
+    offersDelivery: true,
+    offersDineIn: true,
   },
   {
     id: 'r3',
@@ -62,6 +74,10 @@ export const restaurants: Restaurant[] = [
       'https://images.unsplash.com/photo-1514933651103-005eec06c04b?auto=format&fit=crop&w=900&q=80',
     tag: 'Trending',
     featured: true,
+    latitude: 40.7306,
+    longitude: -73.9866,
+    offersDelivery: true,
+    offersDineIn: true,
   },
   {
     id: 'r4',
@@ -75,6 +91,10 @@ export const restaurants: Restaurant[] = [
       'https://images.unsplash.com/photo-1528605248644-14dd04022da1?auto=format&fit=crop&w=900&q=80',
     tag: 'New',
     featured: false,
+    latitude: 40.7188,
+    longitude: -73.9973,
+    offersDelivery: true,
+    offersDineIn: true,
   },
 ];
 

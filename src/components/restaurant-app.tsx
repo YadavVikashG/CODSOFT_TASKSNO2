@@ -58,6 +58,12 @@ export function RestaurantApp() {
   const [selectedRestaurantId, setSelectedRestaurantId] = useState('');
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [search, setSearch] = useState('');
+  const [searchMode, setSearchMode] = useState<'all' | 'delivery' | 'dine-in'>('all');
+  const [dietaryPreference, setDietaryPreference] = useState<'all' | 'veg' | 'non-veg'>('all');
+  const [minimumRating, setMinimumRating] = useState('0');
+  const [radiusKm, setRadiusKm] = useState('10');
+  const [searchLocation, setSearchLocation] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [locationMessage, setLocationMessage] = useState('');
   const [cart, setCart] = useState<CartItem[]>([]);
   const [status, setStatus] = useState('Loading delicious options...');
   const [orders, setOrders] = useState<Order[]>([]);
@@ -84,17 +90,6 @@ export function RestaurantApp() {
     : selectedRestaurantId;
 
   useEffect(() => {
-    const loadRestaurants = async () => {
-      try {
-        const response = await fetch('/api/restaurants');
-        const data = await response.json();
-        setRestaurants(data);
-        if (data.length > 0) setSelectedRestaurantId(data[0].id);
-      } catch {
-        setStatus('Unable to load restaurants right now.');
-      }
-    };
-
     const loadOrders = async () => {
       try {
         const response = await fetch('/api/orders');
@@ -105,13 +100,50 @@ export function RestaurantApp() {
       }
     };
 
-    void loadRestaurants();
     void loadOrders();
     void fetch('/api/auth/session')
       .then((response) => response.json())
       .then((data) => setUser(data.user || null))
       .catch(() => setUser(null));
   }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const timer = setTimeout(async () => {
+      try {
+        const params = new URLSearchParams({
+          q: search,
+          mode: searchMode,
+          dietary: dietaryPreference,
+          minRating: minimumRating,
+        });
+        if (searchLocation) {
+          params.set('latitude', String(searchLocation.latitude));
+          params.set('longitude', String(searchLocation.longitude));
+          params.set('radiusKm', radiusKm);
+        }
+
+        const response = await fetch(`/api/restaurants?${params}`, { signal: controller.signal });
+        if (!response.ok) throw new Error('Unable to search restaurants.');
+        const results = await response.json();
+        setRestaurants(results);
+        setSelectedRestaurantId((current) =>
+          results.some((restaurant: Restaurant) => restaurant.id === current)
+            ? current
+            : results[0]?.id || '',
+        );
+        setStatus('');
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') return;
+        setStatus('Unable to search restaurants right now.');
+      }
+    }, 250);
+
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [search, searchMode, dietaryPreference, minimumRating, radiusKm, searchLocation]);
 
   useEffect(() => {
     if (!restaurantDashboardId) return;
@@ -130,14 +162,23 @@ export function RestaurantApp() {
     void loadMenu();
   }, [restaurantDashboardId]);
 
-  const filteredRestaurants = useMemo(() => {
-    const query = search.trim().toLowerCase();
-    if (!query) return restaurants;
+  const filteredRestaurants = restaurants;
 
-    return restaurants.filter((restaurant) =>
-      restaurant.name.toLowerCase().includes(query) || restaurant.cuisine.toLowerCase().includes(query),
+  const handleUseSearchLocation = () => {
+    if (!navigator.geolocation) {
+      setLocationMessage('Location is unavailable in this browser.');
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      ({ coords }) => {
+        setSearchLocation({ latitude: coords.latitude, longitude: coords.longitude });
+        setLocationMessage('Using your current location.');
+      },
+      () => setLocationMessage('Location permission was denied.'),
+      { enableHighAccuracy: true, timeout: 12000 },
     );
-  }, [restaurants, search]);
+  };
 
   const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const deliveryFee = cart.length > 0 ? 4.99 : 0;
@@ -551,9 +592,9 @@ export function RestaurantApp() {
                     className="w-full border-0 bg-transparent text-sm text-zinc-700 outline-none placeholder:text-zinc-400"
                   />
                 </div>
-                <button className="rounded-full bg-orange-500 px-6 py-3 text-sm font-bold text-white shadow-lg shadow-orange-500/30 transition hover:bg-orange-400">
+                <a href="#featured" className="rounded-full bg-orange-500 px-6 py-3 text-center text-sm font-bold text-white shadow-lg shadow-orange-500/30 transition hover:bg-orange-400">
                   Search Now
-                </button>
+                </a>
               </div>
 
               <div className="mt-8 flex flex-wrap items-center gap-6 text-sm text-zinc-200">
@@ -841,18 +882,96 @@ export function RestaurantApp() {
         )}
 
         <div id="featured" className="mb-10">
-          <div className="mb-6 flex items-center justify-between">
-            <div>
-              <p className="text-sm font-semibold uppercase tracking-[0.2em] text-orange-600">Popular</p>
-              <h2 className="mt-2 text-3xl font-black tracking-tight">Featured restaurants</h2>
+          <div className="mb-6">
+            <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold uppercase tracking-[0.2em] text-orange-600">Discover</p>
+                <h2 className="mt-2 text-3xl font-black tracking-tight">Restaurants near you</h2>
+              </div>
+              <span className="text-sm text-zinc-500">{filteredRestaurants.length} places</span>
             </div>
-            <button className="rounded-full border border-orange-200 px-4 py-2 text-sm font-semibold text-orange-700 hover:bg-orange-50">
-              View all
-            </button>
+
+            <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-zinc-200 bg-white p-3 shadow-sm">
+              <div className="inline-flex rounded-full bg-zinc-100 p-1" aria-label="Service mode" role="group">
+                {([
+                  ['all', 'All'],
+                  ['delivery', 'Delivery'],
+                  ['dine-in', 'Dine-in'],
+                ] as const).map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    aria-pressed={searchMode === value}
+                    onClick={() => setSearchMode(value)}
+                    className={`rounded-full px-3 py-2 text-sm font-semibold transition ${searchMode === value ? 'bg-zinc-900 text-white' : 'text-zinc-600 hover:text-zinc-900'}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              <label className="flex items-center gap-2 text-sm font-medium text-zinc-600">
+                <span>Diet</span>
+                <select
+                  aria-label="Dietary preference"
+                  value={dietaryPreference}
+                  onChange={(event) => setDietaryPreference(event.target.value as typeof dietaryPreference)}
+                  className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-zinc-800 outline-none focus:border-orange-400"
+                >
+                  <option value="all">Any</option>
+                  <option value="veg">Vegetarian</option>
+                  <option value="non-veg">Non-vegetarian</option>
+                </select>
+              </label>
+
+              <label className="flex items-center gap-2 text-sm font-medium text-zinc-600">
+                <span>Rating</span>
+                <select
+                  aria-label="Minimum rating"
+                  value={minimumRating}
+                  onChange={(event) => setMinimumRating(event.target.value)}
+                  className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-zinc-800 outline-none focus:border-orange-400"
+                >
+                  <option value="0">Any</option>
+                  <option value="4">4.0+</option>
+                  <option value="4.5">4.5+</option>
+                </select>
+              </label>
+
+              <button
+                type="button"
+                onClick={handleUseSearchLocation}
+                className="rounded-lg border border-zinc-200 px-3 py-2 text-sm font-semibold text-zinc-700 transition hover:border-orange-300 hover:text-orange-700"
+              >
+                {searchLocation ? 'Location set' : 'Use my location'}
+              </button>
+
+              <label className="flex items-center gap-2 text-sm font-medium text-zinc-600">
+                <span>Within</span>
+                <select
+                  aria-label="Search radius in kilometers"
+                  disabled={!searchLocation}
+                  value={radiusKm}
+                  onChange={(event) => setRadiusKm(event.target.value)}
+                  className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-zinc-800 outline-none focus:border-orange-400 disabled:bg-zinc-100 disabled:text-zinc-400"
+                >
+                  <option value="5">5 km</option>
+                  <option value="10">10 km</option>
+                  <option value="25">25 km</option>
+                  <option value="50">50 km</option>
+                </select>
+              </label>
+              {locationMessage && <span className="text-xs text-zinc-500" role="status">{locationMessage}</span>}
+            </div>
           </div>
 
-          <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-4">
-            {filteredRestaurants.map((restaurant) => (
+          {filteredRestaurants.length === 0 ? (
+            <p className="rounded-xl border border-dashed border-zinc-300 bg-white px-5 py-10 text-center text-sm text-zinc-600">
+              No restaurants match these filters. Try a wider search.
+            </p>
+          ) : (
+            <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-4">
+              {filteredRestaurants.map((restaurant) => (
               <button
                 key={restaurant.id}
                 onClick={() => setSelectedRestaurantId(restaurant.id)}
@@ -890,8 +1009,9 @@ export function RestaurantApp() {
                   </div>
                 </div>
               </button>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="mb-10 rounded-[28px] border border-orange-100 bg-white p-5 shadow-sm sm:p-6">
