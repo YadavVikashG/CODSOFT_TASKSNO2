@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS users (
     CHECK (role IN ('user', 'admin', 'restaurant', 'delivery')),
   phone VARCHAR(40),
   address TEXT,
+  is_on_duty BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -29,6 +30,42 @@ CREATE TABLE IF NOT EXISTS restaurants (
   offers_dine_in BOOLEAN NOT NULL DEFAULT TRUE,
   location geography(Point, 4326)
 );
+
+ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS restaurant_id UUID REFERENCES restaurants(id) ON DELETE SET NULL;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_on_duty BOOLEAN NOT NULL DEFAULT FALSE;
+
+INSERT INTO restaurants (name, cuisine, delivery_time, delivery_fee)
+SELECT profile.name, 'Cuisine not set', 'Set by restaurant', 0
+FROM (VALUES
+  ('saffron@zestmarket.com', 'Saffron Street'),
+  ('green@zestmarket.com', 'Green Bowl Co.'),
+  ('fire@zestmarket.com', 'Fire & Stone'),
+  ('bamboo@zestmarket.com', 'Bamboo Wok')
+) AS profile(email, name)
+WHERE EXISTS (
+  SELECT 1 FROM users
+  WHERE lower(email) = profile.email AND role = 'restaurant'
+)
+AND NOT EXISTS (
+  SELECT 1 FROM restaurants WHERE lower(name) = lower(profile.name)
+);
+
+UPDATE users AS account
+SET restaurant_id = restaurant.id
+FROM (VALUES
+  ('saffron@zestmarket.com', 'Saffron Street'),
+  ('green@zestmarket.com', 'Green Bowl Co.'),
+  ('fire@zestmarket.com', 'Fire & Stone'),
+  ('bamboo@zestmarket.com', 'Bamboo Wok')
+) AS profile(email, name)
+JOIN restaurants AS restaurant ON lower(restaurant.name) = lower(profile.name)
+WHERE lower(account.email) = profile.email
+  AND account.role = 'restaurant'
+  AND account.restaurant_id IS NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_restaurant_id
+  ON users (restaurant_id) WHERE restaurant_id IS NOT NULL;
 
 ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION;
 ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
@@ -69,14 +106,34 @@ CREATE TABLE IF NOT EXISTS menu_items (
   name VARCHAR(150) NOT NULL,
   description TEXT,
   price DECIMAL(10,2) NOT NULL,
+  stock_quantity INTEGER NOT NULL DEFAULT 0
+    CONSTRAINT menu_items_stock_quantity_nonnegative CHECK (stock_quantity >= 0),
+  discount_percent DECIMAL(5,2) NOT NULL DEFAULT 0
+    CONSTRAINT menu_items_discount_percent_range CHECK (discount_percent >= 0 AND discount_percent <= 100),
   spicy BOOLEAN DEFAULT FALSE,
   veg BOOLEAN DEFAULT FALSE,
   popular BOOLEAN DEFAULT FALSE,
   image TEXT
 );
 
+ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS stock_quantity INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS discount_percent DECIMAL(5,2) NOT NULL DEFAULT 0;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'menu_items_stock_quantity_nonnegative') THEN
+    ALTER TABLE menu_items ADD CONSTRAINT menu_items_stock_quantity_nonnegative CHECK (stock_quantity >= 0);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'menu_items_discount_percent_range') THEN
+    ALTER TABLE menu_items ADD CONSTRAINT menu_items_discount_percent_range CHECK (discount_percent >= 0 AND discount_percent <= 100);
+  END IF;
+END;
+$$;
+
 CREATE TABLE IF NOT EXISTS orders (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  customer_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  driver_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  driver_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
   customer_name VARCHAR(150) NOT NULL,
   restaurant_name VARCHAR(150) NOT NULL,
   restaurant_id UUID NULL REFERENCES restaurants(id) ON DELETE SET NULL,
@@ -86,6 +143,11 @@ CREATE TABLE IF NOT EXISTS orders (
   status VARCHAR(50) NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE orders
+  ADD COLUMN IF NOT EXISTS customer_user_id UUID REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS driver_user_id UUID REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS driver_user_id UUID REFERENCES users(id) ON DELETE SET NULL;
 
 CREATE TABLE IF NOT EXISTS reservations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -102,4 +164,7 @@ CREATE INDEX IF NOT EXISTS idx_menu_items_search ON menu_items USING GIN (
   to_tsvector('simple', coalesce(name, '') || ' ' || coalesce(description, ''))
 );
 CREATE INDEX IF NOT EXISTS idx_orders_restaurant_id ON orders(restaurant_id);
+CREATE INDEX IF NOT EXISTS idx_orders_customer_user_id ON orders(customer_user_id);
+CREATE INDEX IF NOT EXISTS idx_orders_driver_user_id ON orders(driver_user_id);
+CREATE INDEX IF NOT EXISTS idx_orders_driver_user_id ON orders(driver_user_id);
 CREATE INDEX IF NOT EXISTS idx_orders_food_code ON orders(food_code);

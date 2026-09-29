@@ -1,0 +1,3 @@
+node --env-file=.env.local scripts/provision-delivery.mjs driver@example.com "Driver Name"
+node --env-file=.env.local scripts/provision-merchant.mjs mastercook "Restaurant Manager"
+node --env-file=.env.local scripts/provision-delivery.mjs driver2@example.com "Ram"

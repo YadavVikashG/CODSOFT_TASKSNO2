@@ -1,4 +1,4 @@
-import { randomBytes, scrypt as scryptCallback, scryptSync, timingSafeEqual } from 'node:crypto';
+import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { pool } from '@/lib/db';
 
 export type UserRole = 'user' | 'admin' | 'restaurant' | 'delivery';
@@ -10,6 +10,8 @@ export type AuthUser = {
   role: UserRole;
   phone: string;
   address: string;
+  restaurantId: string | null;
+  isOnDuty: boolean;
   passwordHash: string;
 };
 
@@ -20,21 +22,12 @@ type UserRow = {
   role: UserRole;
   phone: string | null;
   address: string | null;
+  restaurant_id: string | null;
+  is_on_duty: boolean;
   password_hash: string;
 };
 
 const users = new Map<string, AuthUser>();
-const demoSalt = 'zestmarket-demo-account';
-const demoUser: AuthUser = {
-  id: 'demo-user',
-  name: 'Demo User',
-  email: 'demo@zestmarket.com',
-  role: 'user',
-  phone: '+1 (555) 012-3456',
-  address: '123 Market Street, New York, NY',
-  passwordHash: `scrypt$${demoSalt}$${scryptSync('demo123', demoSalt, 64).toString('hex')}`,
-};
-users.set(demoUser.email, demoUser);
 
 function ensureAuthStorageConfigured() {
   if (!pool && process.env.NODE_ENV === 'production') {
@@ -50,6 +43,8 @@ function mapUser(row: UserRow): AuthUser {
     role: row.role,
     phone: row.phone || '',
     address: row.address || '',
+    restaurantId: row.restaurant_id,
+    isOnDuty: Boolean(row.is_on_duty),
     passwordHash: row.password_hash,
   };
 }
@@ -85,6 +80,8 @@ export function publicUser(user: AuthUser) {
     role: user.role,
     phone: user.phone,
     address: user.address,
+    restaurantId: user.restaurantId,
+    isOnDuty: user.isOnDuty,
   };
 }
 
@@ -103,7 +100,7 @@ export async function registerUser(input: { name: string; email: string; passwor
       const { rows } = await pool.query<UserRow>(
         `INSERT INTO users (full_name, email, password_hash)
          VALUES ($1, $2, $3)
-         RETURNING id, full_name, email, role, phone, address, password_hash`,
+         RETURNING id, full_name, email, role, phone, address, restaurant_id, is_on_duty, password_hash`,
         [name, email, passwordHash],
       );
       return mapUser(rows[0]);
@@ -124,6 +121,8 @@ export async function registerUser(input: { name: string; email: string; passwor
     role: 'user',
     phone: '',
     address: '',
+    restaurantId: null,
+    isOnDuty: false,
     passwordHash,
   };
   users.set(email, user);
@@ -138,7 +137,7 @@ export async function authenticateUser(input: { email: string; password: string 
   let user: AuthUser | undefined;
   if (pool) {
     const { rows } = await pool.query<UserRow>(
-      `SELECT id, full_name, email, role, phone, address, password_hash FROM users WHERE email = $1`,
+      `SELECT id, full_name, email, role, phone, address, restaurant_id, is_on_duty, password_hash FROM users WHERE email = $1`,
       [email],
     );
     if (rows[0]) user = mapUser(rows[0]);
@@ -156,7 +155,7 @@ export async function getUserById(id: string) {
   ensureAuthStorageConfigured();
   if (pool) {
     const { rows } = await pool.query<UserRow>(
-      `SELECT id, full_name, email, role, phone, address, password_hash FROM users WHERE id = $1`,
+      `SELECT id, full_name, email, role, phone, address, restaurant_id, is_on_duty, password_hash FROM users WHERE id = $1`,
       [id],
     );
     return rows[0] ? mapUser(rows[0]) : null;

@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { getUserById } from '@/lib/auth-store';
 
 export const sessionCookieName = 'zestmarket_session';
 const sessionLifetimeSeconds = 60 * 60 * 24 * 7;
@@ -55,4 +56,9 @@ export function getSessionTokenFromRequest(request: Request) {
   const cookies = request.headers.get('cookie')?.split(';') || [];
   const value = cookies.find((cookie) => cookie.trim().startsWith(`${sessionCookieName}=`));
   return value?.trim().slice(sessionCookieName.length + 1);
+}
+
+export async function getAuthenticatedUser(request: Request) {
+  const session = verifySessionToken(getSessionTokenFromRequest(request));
+  return session ? getUserById(session.userId) : null;
 }

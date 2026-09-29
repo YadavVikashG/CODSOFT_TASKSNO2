@@ -14,6 +14,8 @@ type Restaurant = {
   image: string;
   tag: string;
   featured: boolean;
+  offersDelivery: boolean;
+  offersDineIn: boolean;
 };
 
 type MenuItem = {
@@ -23,6 +25,8 @@ type MenuItem = {
   name: string;
   description: string;
   price: number;
+  stockQuantity: number;
+  discountPercent: number;
   spicy?: boolean;
   veg?: boolean;
   popular?: boolean;
@@ -39,18 +43,28 @@ type Order = {
   item: string;
   foodCode?: string;
   total: number;
-  status: 'Preparing' | 'Ready for pickup' | 'Out for delivery' | 'Delivered';
+  status: 'Preparing' | 'Ready for pickup' | 'Picked Up' | 'Out for delivery' | 'Delivered';
   time: string;
 };
 
+type DeliveryJob = Order & { assignedToMe: boolean };
+
 type UserRole = 'user' | 'admin' | 'restaurant' | 'delivery';
 
-const restaurantProfiles = [
-  { id: 'r1', name: 'Saffron Street', email: 'saffron@zestmarket.com' },
-  { id: 'r2', name: 'Green Bowl Co.', email: 'green@zestmarket.com' },
-  { id: 'r3', name: 'Fire & Stone', email: 'fire@zestmarket.com' },
-  { id: 'r4', name: 'Bamboo Wok', email: 'bamboo@zestmarket.com' },
-] as const;
+type AppUser = {
+  id: string;
+  name: string;
+  email: string;
+  role: UserRole;
+  phone: string;
+  address: string;
+  restaurantId: string | null;
+  isOnDuty: boolean;
+};
+
+function discountedPrice(item: Pick<MenuItem, 'price' | 'discountPercent'>) {
+  return Math.round(item.price * (1 - item.discountPercent / 100) * 100) / 100;
+}
 
 export function RestaurantApp() {
   const router = useRouter();
@@ -67,16 +81,23 @@ export function RestaurantApp() {
   const [cart, setCart] = useState<CartItem[]>([]);
   const [status, setStatus] = useState('Loading delicious options...');
   const [orders, setOrders] = useState<Order[]>([]);
-  const [user, setUser] = useState<{ name: string; email: string; role: UserRole; phone: string; address: string } | null>(null);
+  const [deliveryJobs, setDeliveryJobs] = useState<DeliveryJob[]>([]);
+  const [deliveryMessage, setDeliveryMessage] = useState('');
+  const [user, setUser] = useState<AppUser | null>(null);
+  const [sessionReady, setSessionReady] = useState(false);
   const [checkoutMessage, setCheckoutMessage] = useState('');
   const [reservationMessage, setReservationMessage] = useState('');
   const [restaurantDraft, setRestaurantDraft] = useState({
     name: '',
     description: '',
     price: '12.50',
+    stockQuantity: '0',
+    discountPercent: '0',
     category: 'Main Course',
     image: '',
   });
+  const [editingMenuItemId, setEditingMenuItemId] = useState('');
+  const [inventoryDraft, setInventoryDraft] = useState({ price: '', stockQuantity: '', discountPercent: '' });
   const [reservationForm, setReservationForm] = useState({
     name: '',
     date: '',
@@ -86,7 +107,7 @@ export function RestaurantApp() {
   });
 
   const restaurantDashboardId = user?.role === 'restaurant'
-    ? restaurantProfiles.find((profile) => profile.email.toLowerCase() === user.email.toLowerCase())?.id ?? selectedRestaurantId
+    ? user.restaurantId || ''
     : selectedRestaurantId;
 
   useEffect(() => {
@@ -104,8 +125,20 @@ export function RestaurantApp() {
     void fetch('/api/auth/session')
       .then((response) => response.json())
       .then((data) => setUser(data.user || null))
-      .catch(() => setUser(null));
+      .catch(() => setUser(null))
+      .finally(() => setSessionReady(true));
   }, []);
+
+  useEffect(() => {
+    if (user?.role !== 'delivery') return;
+    void fetch('/api/delivery/orders')
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Unable to load delivery orders.');
+        setDeliveryJobs(data);
+      })
+      .catch((error) => setDeliveryMessage(error instanceof Error ? error.message : 'Unable to load delivery orders.'));
+  }, [user?.role]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -180,8 +213,12 @@ export function RestaurantApp() {
     );
   };
 
-  const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
-  const deliveryFee = cart.length > 0 ? 4.99 : 0;
+  const subtotal = cart.reduce((sum, item) =>
+    sum + discountedPrice(item) * item.quantity,
+  0);
+  const deliveryFee = cart.length > 0
+    ? restaurants.find((restaurant) => restaurant.id === selectedRestaurantId)?.fee ?? 0
+    : 0;
   const serviceFee = cart.length > 0 ? 2.5 : 0;
   const total = subtotal + deliveryFee + serviceFee;
 
@@ -193,6 +230,11 @@ export function RestaurantApp() {
 
     setCart((current) => {
       const existing = current.find((entry) => entry.id === item.id);
+      const quantity = existing?.quantity ?? 0;
+      if (quantity >= item.stockQuantity) {
+        alert(`Only ${item.stockQuantity} ${item.name} available.`);
+        return current;
+      }
       if (existing) {
         return current.map((entry) =>
           entry.id === item.id ? { ...entry, quantity: entry.quantity + 1 } : entry,
@@ -224,7 +266,6 @@ export function RestaurantApp() {
   const userOrderHistory = user
     ? orders.filter((order) => order.customer.toLowerCase() === user.name.toLowerCase())
     : [];
-  const deliveryMapQuery = encodeURIComponent(user?.address || selectedRestaurant?.name || 'restaurant');
 
   const handleRepeatOrder = (order: Order) => {
     const matchedItem = menu.find((item) => item.name.toLowerCase() === order.item.toLowerCase())
@@ -254,12 +295,53 @@ export function RestaurantApp() {
     setUser(null);
   };
 
-  const handleStatusUpdate = (orderId: string, nextStatus: Order['status']) => {
-    setOrders((current) =>
-      current.map((order) =>
-        order.id === orderId ? { ...order, status: nextStatus } : order,
-      ),
-    );
+  const handleDutyToggle = async () => {
+    if (!user || user.role !== 'delivery') return;
+    try {
+      const response = await fetch('/api/delivery/status', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isOnDuty: !user.isOnDuty }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Unable to update duty status.');
+      setUser((current) => current ? { ...current, isOnDuty: data.isOnDuty } : current);
+      setDeliveryMessage('');
+    } catch (error) {
+      setDeliveryMessage(error instanceof Error ? error.message : 'Unable to update duty status.');
+    }
+  };
+
+  const handleDeliveryAction = async (job: DeliveryJob, action: 'accept' | 'picked-up' | 'delivered') => {
+    try {
+      const response = await fetch(`/api/delivery/orders/${job.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Unable to update delivery.');
+      const updated = await fetch('/api/delivery/orders').then((result) => result.json());
+      setDeliveryJobs(updated);
+      setDeliveryMessage('Delivery updated.');
+    } catch (error) {
+      setDeliveryMessage(error instanceof Error ? error.message : 'Unable to update delivery.');
+    }
+  };
+
+  const handleStatusUpdate = async (orderId: string, nextStatus: Order['status']) => {
+    try {
+      const response = await fetch(`/api/orders/${orderId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Unable to update order.');
+      setOrders((current) => current.map((order) => order.id === orderId ? data.order : order));
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Unable to update order.');
+    }
   };
 
   const handleProductImageUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -294,11 +376,20 @@ export function RestaurantApp() {
       alert('Enter a valid price.');
       return;
     }
+    const stockQuantity = Number(restaurantDraft.stockQuantity);
+    const discountPercent = Number(restaurantDraft.discountPercent);
+    if (!Number.isInteger(stockQuantity) || stockQuantity < 0) {
+      alert('Stock must be a whole number greater than or equal to zero.');
+      return;
+    }
+    if (!Number.isFinite(discountPercent) || discountPercent < 0 || discountPercent > 100) {
+      alert('Festival discount must be between 0 and 100 percent.');
+      return;
+    }
 
-    const restaurantProfile = restaurantProfiles.find((profile) => profile.id === restaurantDashboardId);
-    const shortName = (restaurantProfile?.name ?? 'REST').replace(/[^a-zA-Z]/g, '').slice(0, 3).toUpperCase();
+    const shortName = (selectedRestaurant?.name ?? user?.name ?? 'FOOD').replace(/[^a-zA-Z]/g, '').slice(0, 3).toUpperCase();
     const code = `${shortName}-${String(Date.now()).slice(-6)}`;
-    const image = restaurantDraft.image || 'https://images.unsplash.com/photo-1544025162-d76694265947?auto=format&fit=crop&w=900&q=80';
+    const image = restaurantDraft.image;
 
     try {
       const response = await fetch('/api/menu', {
@@ -311,6 +402,9 @@ export function RestaurantApp() {
           price: value,
           image,
           code,
+          veg: restaurantDraft.category !== 'Non Veg',
+          stockQuantity,
+          discountPercent,
         }),
       });
 
@@ -326,9 +420,11 @@ export function RestaurantApp() {
         name: restaurantDraft.name.trim(),
         description: restaurantDraft.description.trim(),
         price: value,
+        stockQuantity,
+        discountPercent,
         veg: restaurantDraft.category !== 'Non Veg',
-        popular: true,
-        image: data.item?.image || image,
+        popular: false,
+        image: data.item?.image || '',
       };
 
       setMenu((current) => [newItem, ...current]);
@@ -336,12 +432,60 @@ export function RestaurantApp() {
         name: '',
         description: '',
         price: '12.50',
+        stockQuantity: '0',
+        discountPercent: '0',
         category: 'Main Course',
         image: '',
       });
       alert(`Food uploaded successfully. Unique code: ${code}`);
     } catch (error) {
       alert(error instanceof Error ? error.message : 'Unable to upload food item.');
+    }
+  };
+
+  const handleSaveInventory = async () => {
+    const price = Number(inventoryDraft.price);
+    const stockQuantity = Number(inventoryDraft.stockQuantity);
+    const discountPercent = Number(inventoryDraft.discountPercent);
+    if (!editingMenuItemId || !Number.isFinite(price) || price <= 0) {
+      alert('Enter a price greater than zero.');
+      return;
+    }
+    if (!Number.isInteger(stockQuantity) || stockQuantity < 0) {
+      alert('Stock must be a whole number greater than or equal to zero.');
+      return;
+    }
+    if (!Number.isFinite(discountPercent) || discountPercent < 0 || discountPercent > 100) {
+      alert('Festival discount must be between 0 and 100 percent.');
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/menu/items/${editingMenuItemId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ price, stockQuantity, discountPercent }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Unable to update menu item.');
+      setMenu((current) => current.map((item) => item.id === editingMenuItemId ? data.item : item));
+      setEditingMenuItemId('');
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Unable to update menu item.');
+    }
+  };
+
+  const handleDeleteMenuItem = async (item: MenuItem) => {
+    if (!window.confirm(`Delete ${item.name} from your menu?`)) return;
+
+    try {
+      const response = await fetch(`/api/menu/items/${item.id}`, { method: 'DELETE' });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Unable to delete menu item.');
+      setMenu((current) => current.filter((entry) => entry.id !== item.id));
+      if (editingMenuItemId === item.id) setEditingMenuItemId('');
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Unable to delete menu item.');
     }
   };
 
@@ -370,6 +514,7 @@ export function RestaurantApp() {
           restaurant: selectedRestaurant?.name ?? 'Selected restaurant',
           restaurantId: selectedRestaurant?.id ?? '',
           items: cart.map((item) => ({
+            id: item.id,
             name: item.name,
             quantity: item.quantity,
             price: item.price,
@@ -387,6 +532,8 @@ export function RestaurantApp() {
 
       setOrders((current) => [data.order, ...current]);
       setCart([]);
+      const updatedMenu = await fetch(`/api/menu/${selectedRestaurantId}`).then((result) => result.json());
+      setMenu(updatedMenu);
       setCheckoutMessage('Order placed successfully! Kitchen has received it.');
       setTimeout(() => setCheckoutMessage(''), 3000);
     } catch (error) {
@@ -429,6 +576,11 @@ export function RestaurantApp() {
   };
 
   const activeRole = user?.role ?? 'user';
+  const isConsumer = !user || user.role === 'user';
+
+  if (!sessionReady) {
+    return <main className="grid min-h-screen place-items-center bg-[#fffaf5] text-sm text-zinc-600">Loading your workspace…</main>;
+  }
 
   return (
     <main className="min-h-screen bg-[#fffaf5] text-zinc-900">
@@ -446,15 +598,30 @@ export function RestaurantApp() {
             </div>
 
             <nav className="flex flex-wrap items-center gap-3 text-sm font-medium text-zinc-600">
-              <a href="#featured" className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">
-                Featured
-              </a>
-              <a href="#restaurants" className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">
-                Restaurants
-              </a>
-              <a href="#checkout" className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">
-                Checkout
-              </a>
+              {(!user || user.role === 'user') && (
+                <>
+                  <a href="#featured" className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">Discover</a>
+                  <a href="#restaurants" className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">Menu</a>
+                  <a href="#checkout" className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">Basket</a>
+                  <a href="#reservations" className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">Reservations</a>
+                </>
+              )}
+              {user?.role === 'restaurant' && (
+                <>
+                  <a href="#merchant-orders" className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">Orders</a>
+                  <a href="#merchant-menu" className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">Menu</a>
+                </>
+              )}
+              {user?.role === 'admin' && (
+                <>
+                  <a href="#admin-overview" className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">Overview</a>
+                  <a href="#admin-orders" className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">Orders</a>
+                  <a href="#admin-restaurants" className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">Restaurants</a>
+                </>
+              )}
+              {user?.role === 'delivery' && (
+                <a href="#delivery-jobs" className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">Pickup board</a>
+              )}
             </nav>
 
             {user ? (
@@ -480,95 +647,116 @@ export function RestaurantApp() {
           </div>
         </header>
 
-        {user && activeRole === 'user' && (
-          <div className="mb-10 grid gap-5 lg:grid-cols-2">
-            <div className="rounded-[28px] border border-zinc-200 bg-white p-5 shadow-sm">
-              <p className="text-xs font-bold uppercase tracking-[0.2em] text-orange-600">User profile</p>
-              <h3 className="mt-2 text-2xl font-black">{user.name}</h3>
-              <div className="mt-4 space-y-2 text-sm text-zinc-600">
-                <p><span className="font-semibold text-zinc-800">Phone:</span> {user.phone}</p>
-                <p><span className="font-semibold text-zinc-800">Address:</span> {user.address}</p>
-                <p><span className="font-semibold text-zinc-800">Email:</span> {user.email}</p>
-              </div>
-            </div>
-
-            <div className="rounded-[28px] border border-zinc-200 bg-white p-5 shadow-sm">
-              <p className="text-xs font-bold uppercase tracking-[0.2em] text-sky-600">Delivery map</p>
-              <div className="mt-3 overflow-hidden rounded-2xl border border-zinc-200">
-                <iframe
-                  title="Delivery map"
-                  src={`https://www.google.com/maps?q=${deliveryMapQuery}&output=embed`}
-                  className="h-52 w-full border-0"
-                  loading="lazy"
-                  allowFullScreen
-                />
-              </div>
-            </div>
+        {user?.role === 'user' && (
+          <div className="mb-7 border-b border-zinc-200 pb-5">
+            <p className="text-sm font-semibold text-orange-700">Customer account</p>
+            <h1 className="mt-1 text-2xl font-black">Welcome back, {user.name}</h1>
+            <p className="mt-1 text-sm text-zinc-500">{user.email}</p>
           </div>
         )}
 
-        {user && activeRole !== 'user' && (
-          <div className="mb-10 grid gap-5 lg:grid-cols-3">
-            {activeRole === 'admin' && (
-              <>
-                <div className="rounded-[24px] border border-violet-200 bg-violet-50 p-5">
-                  <p className="text-xs font-bold uppercase tracking-[0.2em] text-violet-700">Orders</p>
-                  <p className="mt-3 text-4xl font-black text-violet-900">{orders.length}</p>
-                  <p className="mt-2 text-sm text-violet-700">Live tracked orders</p>
+        {user?.role === 'admin' && (
+          <section id="admin-overview" className="mb-8">
+            <p className="text-sm font-semibold uppercase text-orange-700">Platform administration</p>
+            <h1 className="mt-1 text-3xl font-black">Operations overview</h1>
+            <div className="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+              {[
+                { label: 'Restaurants', value: restaurantMetrics.restaurantCount },
+                { label: 'Recorded orders', value: orders.length },
+                { label: 'Customers with orders', value: new Set(orders.map((order) => order.customer)).size },
+                { label: 'Recorded order totals', value: `$${orders.reduce((sum, order) => sum + order.total, 0).toFixed(2)}` },
+              ].map((metric) => (
+                <div key={metric.label} className="border-l-2 border-orange-500 bg-white px-5 py-4">
+                  <p className="text-sm text-zinc-500">{metric.label}</p>
+                  <p className="mt-2 text-3xl font-black text-zinc-900">{metric.value}</p>
                 </div>
-                <div className="rounded-[24px] border border-emerald-200 bg-emerald-50 p-5">
-                  <p className="text-xs font-bold uppercase tracking-[0.2em] text-emerald-700">Revenue</p>
-                  <p className="mt-3 text-4xl font-black text-emerald-900">$12.4k</p>
-                  <p className="mt-2 text-sm text-emerald-700">This week</p>
-                </div>
-                <div className="rounded-[24px] border border-sky-200 bg-sky-50 p-5">
-                  <p className="text-xs font-bold uppercase tracking-[0.2em] text-sky-700">Customers</p>
-                  <p className="mt-3 text-4xl font-black text-sky-900">8.5k</p>
-                  <p className="mt-2 text-sm text-sky-700">Active users</p>
-                </div>
-              </>
-            )}
-            {activeRole === 'restaurant' && (
-              <>
-                <div className="rounded-[24px] border border-emerald-200 bg-emerald-50 p-5">
-                  <p className="text-xs font-bold uppercase tracking-[0.2em] text-emerald-700">Menu Items</p>
-                  <p className="mt-3 text-4xl font-black text-emerald-900">28</p>
-                  <p className="mt-2 text-sm text-emerald-700">Available this week</p>
-                </div>
-                <div className="rounded-[24px] border border-orange-200 bg-orange-50 p-5">
-                  <p className="text-xs font-bold uppercase tracking-[0.2em] text-orange-700">Pending</p>
-                  <p className="mt-3 text-4xl font-black text-orange-900">{orders.filter((item) => item.status === 'Preparing').length}</p>
-                  <p className="mt-2 text-sm text-orange-700">Orders to prepare</p>
-                </div>
-                <div className="rounded-[24px] border border-amber-200 bg-amber-50 p-5">
-                  <p className="text-xs font-bold uppercase tracking-[0.2em] text-amber-700">Rating</p>
-                  <p className="mt-3 text-4xl font-black text-amber-900">4.9</p>
-                  <p className="mt-2 text-sm text-amber-700">Last 30 days</p>
-                </div>
-              </>
-            )}
-            {activeRole === 'delivery' && (
-              <>
-                <div className="rounded-[24px] border border-sky-200 bg-sky-50 p-5">
-                  <p className="text-xs font-bold uppercase tracking-[0.2em] text-sky-700">Trips</p>
-                  <p className="mt-3 text-4xl font-black text-sky-900">14</p>
-                  <p className="mt-2 text-sm text-sky-700">Assigned today</p>
-                </div>
-                <div className="rounded-[24px] border border-emerald-200 bg-emerald-50 p-5">
-                  <p className="text-xs font-bold uppercase tracking-[0.2em] text-emerald-700">Completed</p>
-                  <p className="mt-3 text-4xl font-black text-emerald-900">11</p>
-                  <p className="mt-2 text-sm text-emerald-700">On-time deliveries</p>
-                </div>
-                <div className="rounded-[24px] border border-rose-200 bg-rose-50 p-5">
-                  <p className="text-xs font-bold uppercase tracking-[0.2em] text-rose-700">Earnings</p>
-                  <p className="mt-3 text-4xl font-black text-rose-900">$420</p>
-                  <p className="mt-2 text-sm text-rose-700">Today</p>
-                </div>
-              </>
-            )}
-          </div>
+              ))}
+            </div>
+          </section>
         )}
 
+        {user?.role === 'restaurant' && (
+          <section className="mb-8 border-b border-zinc-200 pb-6">
+            <p className="text-sm font-semibold uppercase text-emerald-700">Restaurant workspace</p>
+            <h1 className="mt-1 text-3xl font-black">{selectedRestaurant?.name || 'Your restaurant'}</h1>
+            <div className="mt-5 grid gap-4 sm:grid-cols-3">
+              {[
+                { label: 'Your menu items', value: menu.length },
+                { label: 'Orders to prepare', value: restaurantOrders.filter((order) => order.status === 'Preparing').length },
+                { label: 'Recorded order totals', value: `$${restaurantOrders.reduce((sum, order) => sum + order.total, 0).toFixed(2)}` },
+              ].map((metric) => (
+                <div key={metric.label} className="border-l-2 border-emerald-600 bg-white px-5 py-4">
+                  <p className="text-sm text-zinc-500">{metric.label}</p>
+                  <p className="mt-2 text-3xl font-black text-zinc-900">{metric.value}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {user?.role === 'delivery' && (
+          <section id="delivery-jobs" className="mb-10">
+            <div className="mb-5 flex flex-wrap items-end justify-between gap-4 border-b border-zinc-200 pb-5">
+              <div>
+                <p className="text-sm font-semibold uppercase text-sky-700">Delivery workspace</p>
+                <h1 className="mt-1 text-3xl font-black">Pickup board</h1>
+                <p className="mt-1 text-sm text-zinc-500">Signed in as {user.name} · {user.email}</p>
+              </div>
+              <button
+                type="button"
+                aria-pressed={user.isOnDuty}
+                onClick={handleDutyToggle}
+                className={`rounded-lg px-4 py-3 text-sm font-bold text-white ${user.isOnDuty ? 'bg-emerald-700 hover:bg-emerald-800' : 'bg-zinc-700 hover:bg-zinc-800'}`}
+              >
+                {user.isOnDuty ? 'On duty · Go off duty' : 'Off duty · Go on duty'}
+              </button>
+            </div>
+
+            <div className="mb-4 flex flex-wrap gap-5 text-sm text-zinc-600">
+              <span>{deliveryJobs.filter((job) => !job.assignedToMe).length} pickups available</span>
+              <span>{deliveryJobs.filter((job) => job.assignedToMe).length} assigned to you</span>
+            </div>
+            {deliveryMessage && <p className="mb-4 text-sm text-sky-800" role="status">{deliveryMessage}</p>}
+
+            {deliveryJobs.length === 0 ? (
+              <p className="border border-dashed border-zinc-300 bg-white px-5 py-10 text-sm text-zinc-600">
+                {user.isOnDuty ? 'No pickups are ready right now.' : 'Go on duty to see available pickups.'}
+              </p>
+            ) : (
+              <div className="divide-y divide-zinc-200 bg-white">
+                {deliveryJobs.map((job) => (
+                  <article key={job.id} className="flex flex-wrap items-center justify-between gap-4 px-4 py-4">
+                    <div>
+                      <p className="font-semibold">{job.restaurant} · {job.item}</p>
+                      <p className="mt-1 text-sm text-zinc-500">Customer: {job.customer} · {job.time}</p>
+                      <p className="mt-1 text-sm text-zinc-600">Order total ${job.total.toFixed(2)} · {job.status}</p>
+                    </div>
+                    {!job.assignedToMe ? (
+                      <button
+                        type="button"
+                        disabled={!user.isOnDuty}
+                        onClick={() => handleDeliveryAction(job, 'accept')}
+                        className="rounded bg-sky-700 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
+                      >
+                        Accept pickup
+                      </button>
+                    ) : job.status === 'Ready for pickup' ? (
+                      <button type="button" onClick={() => handleDeliveryAction(job, 'picked-up')} className="rounded bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800">
+                        Mark picked up
+                      </button>
+                    ) : (
+                      <button type="button" onClick={() => handleDeliveryAction(job, 'delivered')} className="rounded bg-zinc-900 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-700">
+                        Mark delivered
+                      </button>
+                    )}
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+
+        {(!user || user.role === 'user') && (
         <div className="mb-10 overflow-hidden rounded-[32px] bg-gradient-to-br from-zinc-900 via-zinc-800 to-orange-900 p-8 text-white shadow-xl shadow-orange-100 sm:p-12">
           <div className="grid gap-10 lg:grid-cols-[1.2fr_0.8fr] lg:items-center">
             <div>
@@ -618,17 +806,17 @@ export function RestaurantApp() {
                 <div className="mb-4 flex items-center justify-between">
                   <div>
                     <p className="text-xs uppercase tracking-[0.18em] text-zinc-500">Selected restaurant</p>
-                    <h2 className="mt-1 text-2xl font-black">{selectedRestaurant?.name ?? 'Pick a place'}</h2>
+                    <h2 className="mt-1 text-2xl font-black">{selectedRestaurant?.name ?? 'Select a restaurant'}</h2>
                   </div>
                   <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-700">
-                    {selectedRestaurant?.deliveryTime ?? '20-30 min'}
+                    {selectedRestaurant?.deliveryTime ?? 'No ETA available'}
                   </span>
                 </div>
 
                 <div className="space-y-3 text-sm text-zinc-600">
                   <div className="flex items-center justify-between rounded-2xl bg-zinc-100 p-3">
                     <span>Cuisine</span>
-                    <span className="font-semibold text-zinc-900">{selectedRestaurant?.cuisine ?? 'Local favorites'}</span>
+                    <span className="font-semibold text-zinc-900">{selectedRestaurant?.cuisine ?? 'Not set'}</span>
                   </div>
                   <div className="flex items-center justify-between rounded-2xl bg-zinc-100 p-3">
                     <span>Delivery</span>
@@ -643,86 +831,99 @@ export function RestaurantApp() {
             </div>
           </div>
         </div>
+        )}
 
-        {user && activeRole !== 'user' && (
-          <div className="mb-10 grid gap-5 lg:grid-cols-2">
-            {(activeRole === 'admin' || activeRole === 'restaurant') && (
-              <div className="rounded-[28px] border border-zinc-200 bg-white p-5 shadow-sm">
-                <div className="mb-4 flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-semibold uppercase tracking-[0.2em] text-orange-600">Operations</p>
-                    <h3 className="mt-2 text-2xl font-black">{activeRole === 'restaurant' ? 'My restaurant queue' : 'Order queue'}</h3>
+        {user?.role === 'admin' && (
+          <section id="admin-orders" className="mb-10 border-b border-zinc-200 pb-8">
+            <h2 className="mb-4 text-2xl font-black">All orders</h2>
+            {orders.length === 0 ? (
+              <p className="bg-white px-5 py-8 text-sm text-zinc-600">No orders have been placed.</p>
+            ) : (
+              <div className="divide-y divide-zinc-200 bg-white">
+                {orders.map((order) => (
+                  <div key={order.id} className="flex flex-wrap items-center justify-between gap-3 px-4 py-4">
+                    <div>
+                      <p className="font-semibold">{order.item}</p>
+                      <p className="mt-1 text-sm text-zinc-500">{order.customer} · {order.restaurant} · {order.time}</p>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <span className="text-sm text-zinc-600">${order.total.toFixed(2)} · {order.status}</span>
+                      <select
+                        aria-label={`Update status for order ${order.id}`}
+                        value={order.status}
+                        onChange={(event) => handleStatusUpdate(order.id, event.target.value as Order['status'])}
+                        className="rounded border border-zinc-200 bg-white px-2 py-2 text-sm"
+                      >
+                        <option>Preparing</option>
+                        <option>Ready for pickup</option>
+                        <option>Picked Up</option>
+                        <option>Out for delivery</option>
+                        <option>Delivered</option>
+                      </select>
+                    </div>
                   </div>
-                </div>
-                <div className="space-y-3">
-                  {(activeRole === 'restaurant' ? restaurantOrders : orders).slice(0, 4).map((order) => (
-                    <div key={order.id} className="flex items-center justify-between rounded-2xl bg-zinc-50 p-3">
-                      <div>
-                        <p className="font-bold">{order.customer}</p>
-                        <p className="text-sm text-zinc-500">{order.item} • {order.foodCode || 'NO CODE'}</p>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium text-zinc-600">{order.status}</span>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+
+        {user?.role === 'admin' && (
+          <section id="admin-restaurants" className="mb-10 border-b border-zinc-200 pb-8">
+            <div className="mb-4 flex items-end justify-between">
+              <div>
+                <p className="text-sm font-semibold uppercase text-orange-700">Directory</p>
+                <h2 className="mt-1 text-2xl font-black">Partner restaurants</h2>
+              </div>
+              <span className="text-sm text-zinc-500">{restaurants.length} records</span>
+            </div>
+            {restaurants.length === 0 ? (
+              <p className="bg-white px-5 py-8 text-sm text-zinc-600">No restaurant records are available.</p>
+            ) : (
+              <div className="divide-y divide-zinc-200 bg-white">
+                {restaurants.map((restaurant) => (
+                  <div key={restaurant.id} className="flex flex-wrap items-center justify-between gap-3 px-4 py-4">
+                    <div>
+                      <p className="font-semibold">{restaurant.name}</p>
+                      <p className="mt-1 text-sm text-zinc-500">{restaurant.cuisine} · {restaurant.deliveryTime}</p>
+                    </div>
+                    <span className="text-sm text-zinc-600">{restaurant.rating.toFixed(1)} rating · {restaurant.reviews} reviews</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+
+        {user?.role === 'restaurant' && (
+          <section id="merchant-orders" className="mb-10 border-b border-zinc-200 pb-8">
+            <h2 className="mb-4 text-2xl font-black">Incoming orders</h2>
+            {restaurantOrders.length === 0 ? (
+              <p className="bg-white px-5 py-8 text-sm text-zinc-600">No orders for your restaurant yet.</p>
+            ) : (
+              <div className="divide-y divide-zinc-200 bg-white">
+                {restaurantOrders.map((order) => (
+                  <div key={order.id} className="flex flex-wrap items-center justify-between gap-3 px-4 py-4">
+                    <div>
+                      <p className="font-semibold">{order.item}</p>
+                      <p className="mt-1 text-sm text-zinc-500">{order.customer} · {order.time}</p>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <span className="text-sm text-zinc-600">${order.total.toFixed(2)} · {order.status}</span>
+                      {order.status === 'Preparing' && (
                         <button
                           onClick={() => handleStatusUpdate(order.id, 'Ready for pickup')}
-                          className="rounded-full bg-orange-500 px-3 py-1.5 text-xs font-bold text-white"
+                          className="rounded bg-emerald-700 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-800"
                         >
-                          Pack
+                          Mark ready
                         </button>
-                      </div>
+                      )}
                     </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {activeRole === 'delivery' && (
-              <div className="rounded-[28px] border border-zinc-200 bg-white p-5 shadow-sm">
-                <div className="mb-4 flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-semibold uppercase tracking-[0.2em] text-sky-600">Delivery map</p>
-                    <h3 className="mt-2 text-2xl font-black">Active routes</h3>
                   </div>
-                </div>
-                <div className="space-y-3">
-                  {[
-                    { id: 'DEL-102', customer: 'Ava Thompson', route: 'Downtown • 12 min away', status: 'Out for delivery' },
-                    { id: 'DEL-108', customer: 'Lucas Chen', route: 'West End • 8 min away', status: 'Preparing' },
-                  ].map((delivery) => (
-                    <div key={delivery.id} className="rounded-2xl bg-zinc-50 p-3">
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <p className="font-bold">{delivery.customer}</p>
-                          <p className="text-sm text-zinc-500">{delivery.route}</p>
-                        </div>
-                        <button
-                          onClick={() => handleStatusUpdate('ORD-1042', 'Delivered')}
-                          className="rounded-full bg-sky-500 px-3 py-1.5 text-xs font-bold text-white"
-                        >
-                          Mark done
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                ))}
               </div>
             )}
-
-            <div className="rounded-[28px] border border-zinc-200 bg-white p-5 shadow-sm">
-              <div className="mb-4 flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-semibold uppercase tracking-[0.2em] text-orange-600">Quick actions</p>
-                  <h3 className="mt-2 text-2xl font-black">{activeRole === 'admin' ? 'Admin tools' : activeRole === 'restaurant' ? 'Restaurant controls' : 'Delivery controls'}</h3>
-                </div>
-              </div>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <button className="rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-bold text-white">View reports</button>
-                <button className="rounded-2xl bg-orange-50 px-4 py-3 text-sm font-bold text-orange-700">Export data</button>
-                <button className="rounded-2xl bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-700">Dispatch orders</button>
-                <button className="rounded-2xl bg-violet-50 px-4 py-3 text-sm font-bold text-violet-700">Resolve issues</button>
-              </div>
-            </div>
-          </div>
+          </section>
         )}
 
         {user?.role === 'restaurant' && (
@@ -752,6 +953,32 @@ export function RestaurantApp() {
                   step="0.01"
                   value={restaurantDraft.price}
                   onChange={(event) => setRestaurantDraft((current) => ({ ...current, price: event.target.value }))}
+                  className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 outline-none focus:border-orange-400"
+                />
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-semibold text-zinc-700">Starting stock</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  required
+                  value={restaurantDraft.stockQuantity}
+                  onChange={(event) => setRestaurantDraft((current) => ({ ...current, stockQuantity: event.target.value }))}
+                  className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 outline-none focus:border-orange-400"
+                />
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-semibold text-zinc-700">Festival discount (%)</label>
+                <input
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value={restaurantDraft.discountPercent}
+                  onChange={(event) => setRestaurantDraft((current) => ({ ...current, discountPercent: event.target.value }))}
                   className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 outline-none focus:border-orange-400"
                 />
               </div>
@@ -814,6 +1041,85 @@ export function RestaurantApp() {
           </div>
         )}
 
+        {user?.role === 'restaurant' && (
+          <section id="merchant-menu" className="mb-10">
+            <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold uppercase text-emerald-700">Published menu</p>
+                <h2 className="mt-1 text-2xl font-black">Your dishes</h2>
+              </div>
+              <span className="text-sm text-zinc-500">{menu.length} items</span>
+            </div>
+            {menu.length === 0 ? (
+              <p className="bg-white px-5 py-8 text-sm text-zinc-600">Your menu is empty. Add a dish above to publish it to customers.</p>
+            ) : (
+              <div className="divide-y divide-zinc-200 bg-white">
+                {menu.map((item) => {
+                  const isEditing = editingMenuItemId === item.id;
+                  const salePrice = Math.round(item.price * (1 - item.discountPercent / 100) * 100) / 100;
+                  return (
+                    <article key={item.id} className="px-4 py-4">
+                      <div className="flex flex-wrap items-center justify-between gap-4">
+                        <div>
+                          <p className="font-semibold">{item.name}</p>
+                          <p className="mt-1 text-sm text-zinc-500">{item.description}</p>
+                          <p className="mt-1 text-xs text-zinc-500">{item.veg ? 'Vegetarian' : 'Non-vegetarian'} · Code {item.code}</p>
+                          <p className={`mt-1 text-sm font-semibold ${item.stockQuantity > 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
+                            {item.stockQuantity > 0 ? `${item.stockQuantity} in stock` : 'Out of stock'}
+                            {item.discountPercent > 0 && ` · ${item.discountPercent}% festival discount`}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-4">
+                          <div className="text-right">
+                            {item.discountPercent > 0 && <p className="text-sm text-zinc-500 line-through">${item.price.toFixed(2)}</p>}
+                            <p className="font-bold">${salePrice.toFixed(2)}</p>
+                          </div>
+                          <button
+                            type="button"
+                            aria-expanded={isEditing}
+                            onClick={() => {
+                              setEditingMenuItemId(isEditing ? '' : item.id);
+                              setInventoryDraft({
+                                price: String(item.price),
+                                stockQuantity: String(item.stockQuantity),
+                                discountPercent: String(item.discountPercent),
+                              });
+                            }}
+                            className="rounded border border-zinc-300 px-3 py-2 text-sm font-semibold text-zinc-700 hover:border-orange-400 hover:text-orange-700"
+                          >
+                            {isEditing ? 'Close' : 'Edit item'}
+                          </button>
+                        </div>
+                      </div>
+
+                      {isEditing && (
+                        <div className="mt-4 grid gap-3 border-t border-zinc-200 pt-4 sm:grid-cols-3">
+                          <label className="grid gap-1 text-sm font-medium text-zinc-700">
+                            Price
+                            <input type="number" min="0.01" step="0.01" value={inventoryDraft.price} onChange={(event) => setInventoryDraft((current) => ({ ...current, price: event.target.value }))} className="rounded border border-zinc-300 px-3 py-2" />
+                          </label>
+                          <label className="grid gap-1 text-sm font-medium text-zinc-700">
+                            Stock quantity
+                            <input type="number" min="0" step="1" value={inventoryDraft.stockQuantity} onChange={(event) => setInventoryDraft((current) => ({ ...current, stockQuantity: event.target.value }))} className="rounded border border-zinc-300 px-3 py-2" />
+                          </label>
+                          <label className="grid gap-1 text-sm font-medium text-zinc-700">
+                            Festival discount (%)
+                            <input type="number" min="0" max="100" step="1" value={inventoryDraft.discountPercent} onChange={(event) => setInventoryDraft((current) => ({ ...current, discountPercent: event.target.value }))} className="rounded border border-zinc-300 px-3 py-2" />
+                          </label>
+                          <div className="flex flex-wrap gap-2 sm:col-span-3">
+                            <button type="button" onClick={handleSaveInventory} className="rounded bg-zinc-900 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-700">Save changes</button>
+                            <button type="button" onClick={() => handleDeleteMenuItem(item)} className="rounded border border-rose-300 px-4 py-2 text-sm font-semibold text-rose-700 hover:bg-rose-50">Delete item</button>
+                          </div>
+                        </div>
+                      )}
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        )}
+
         {user && activeRole === 'user' && userOrderHistory.length > 0 && (
           <div className="mb-10 rounded-[28px] border border-zinc-200 bg-white p-5 shadow-sm sm:p-6">
             <div className="mb-6 flex items-center justify-between">
@@ -851,36 +1157,7 @@ export function RestaurantApp() {
           </div>
         )}
 
-        {user && activeRole !== 'user' && restaurantOrders.length > 0 && (
-          <div className="mb-10 rounded-[28px] border border-zinc-200 bg-white p-5 shadow-sm sm:p-6">
-            <div className="mb-6 flex items-center justify-between">
-              <div>
-                <p className="text-sm font-semibold uppercase tracking-[0.2em] text-orange-600">Restaurant history</p>
-                <h2 className="mt-2 text-3xl font-black tracking-tight">Your order history</h2>
-              </div>
-            </div>
-
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-              {restaurantOrders.map((order) => (
-                <div key={order.id} className="rounded-[22px] border border-zinc-200 bg-zinc-50 p-4">
-                  <div className="mb-2 flex items-center justify-between">
-                    <span className="text-xs font-bold uppercase tracking-[0.14em] text-zinc-500">{order.id}</span>
-                    <span className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-emerald-700">
-                      {order.status}
-                    </span>
-                  </div>
-                  <h3 className="text-lg font-black tracking-tight">{order.customer}</h3>
-                  <p className="mt-2 text-sm text-zinc-600">{order.item} • {order.foodCode || 'FOOD-UNKNOWN'}</p>
-                  <div className="mt-4 flex items-center justify-between text-sm text-zinc-500">
-                    <span>{order.time}</span>
-                    <span className="font-black text-zinc-900">${order.total.toFixed(2)}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
+        {isConsumer && (
         <div id="featured" className="mb-10">
           <div className="mb-6">
             <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
@@ -981,11 +1258,13 @@ export function RestaurantApp() {
                     : 'border-zinc-200'
                 }`}
               >
-                <div className="relative h-44 overflow-hidden">
-                  <img src={restaurant.image} alt={restaurant.name} className="h-full w-full object-cover transition duration-500 group-hover:scale-105" />
-                  <span className="absolute left-4 top-4 rounded-full bg-white/90 px-3 py-1 text-xs font-bold text-orange-700">
-                    {restaurant.tag}
-                  </span>
+                <div className="relative grid h-44 place-items-center overflow-hidden bg-zinc-100">
+                  {restaurant.image ? (
+                    <img src={restaurant.image} alt={restaurant.name} className="h-full w-full object-cover transition duration-500 group-hover:scale-105" />
+                  ) : (
+                    <span className="text-sm text-zinc-500">Photo not provided</span>
+                  )}
+                  {restaurant.tag && <span className="absolute left-4 top-4 rounded-full bg-white/90 px-3 py-1 text-xs font-bold text-orange-700">{restaurant.tag}</span>}
                 </div>
                 <div className="space-y-3 p-4">
                   <div className="flex items-start justify-between gap-4">
@@ -993,8 +1272,8 @@ export function RestaurantApp() {
                       <h3 className="text-xl font-black tracking-tight">{restaurant.name}</h3>
                       <p className="mt-1 text-sm text-zinc-500">{restaurant.cuisine}</p>
                     </div>
-                    <div className="rounded-full bg-green-100 px-2 py-1 text-xs font-bold text-green-700">
-                      ★ {restaurant.rating}
+                    <div className="rounded-full bg-zinc-100 px-2 py-1 text-xs font-bold text-zinc-700">
+                      {restaurant.reviews > 0 ? `★ ${restaurant.rating}` : 'Not rated'}
                     </div>
                   </div>
 
@@ -1004,7 +1283,7 @@ export function RestaurantApp() {
                   </div>
 
                   <div className="flex items-center justify-between border-t border-zinc-100 pt-3">
-                    <span className="font-semibold text-zinc-800">Delivery • ${restaurant.fee.toFixed(2)}</span>
+                    <span className="font-semibold text-zinc-800">{restaurant.offersDelivery ? `Delivery · $${restaurant.fee.toFixed(2)}` : 'Dine-in'}</span>
                     <span className="text-orange-600">View menu</span>
                   </div>
                 </div>
@@ -1013,48 +1292,9 @@ export function RestaurantApp() {
             </div>
           )}
         </div>
+        )}
 
-        <div className="mb-10 rounded-[28px] border border-orange-100 bg-white p-5 shadow-sm sm:p-6">
-          <div className="mb-6 flex items-center justify-between">
-            <div>
-              <p className="text-sm font-semibold uppercase tracking-[0.2em] text-orange-600">Operations</p>
-              <h2 className="mt-2 text-3xl font-black tracking-tight">Kitchen dashboard</h2>
-            </div>
-            <span className="rounded-full bg-orange-50 px-3 py-2 text-sm font-semibold text-orange-700">
-              {orders.length} live orders
-            </span>
-          </div>
-
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-            {orders.map((order) => (
-              <div key={order.id} className="rounded-[22px] border border-zinc-200 bg-zinc-50 p-4">
-                <div className="mb-3 flex items-center justify-between">
-                  <span className="text-xs font-bold uppercase tracking-[0.14em] text-zinc-500">{order.id}</span>
-                  <span
-                    className={`rounded-full px-2 py-1 text-[10px] font-bold uppercase tracking-[0.12em] ${
-                      order.status === 'Preparing'
-                        ? 'bg-amber-100 text-amber-700'
-                        : order.status === 'Out for delivery'
-                          ? 'bg-sky-100 text-sky-700'
-                          : order.status === 'Ready for pickup'
-                            ? 'bg-emerald-100 text-emerald-700'
-                            : 'bg-zinc-200 text-zinc-700'
-                    }`}
-                  >
-                    {order.status}
-                  </span>
-                </div>
-                <h3 className="text-lg font-black tracking-tight">{order.item}</h3>
-                <p className="mt-2 text-sm text-zinc-600">{order.customer} • {order.restaurant}</p>
-                <div className="mt-4 flex items-center justify-between text-sm text-zinc-500">
-                  <span>{order.time}</span>
-                  <span className="font-black text-zinc-900">${order.total.toFixed(2)}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
+        {isConsumer && (
         <div id="restaurants" className="grid gap-8 lg:grid-cols-[1.2fr_0.8fr]">
           <section className="rounded-[28px] border border-zinc-200 bg-white p-5 shadow-sm sm:p-6">
             <div className="mb-6 flex items-center justify-between">
@@ -1071,10 +1311,19 @@ export function RestaurantApp() {
 
             {status && <p className="mb-4 text-sm text-zinc-500">{status}</p>}
 
+            {menu.length === 0 ? (
+              <p className="border border-dashed border-zinc-300 px-5 py-8 text-sm text-zinc-600">
+                This restaurant has not published any dishes yet.
+              </p>
+            ) : (
             <div className="grid gap-4">
               {menu.map((item) => (
                 <article key={item.id} className="flex flex-col gap-4 rounded-[26px] border border-zinc-200 p-3 sm:flex-row">
-                  <img src={item.image} alt={item.name} className="h-28 w-full rounded-[20px] object-cover sm:w-36" />
+                  {item.image ? (
+                    <img src={item.image} alt={item.name} className="h-28 w-full rounded-[20px] object-cover sm:w-36" />
+                  ) : (
+                    <div className="grid h-28 w-full place-items-center rounded-[20px] bg-zinc-100 text-xs text-zinc-500 sm:w-36">No photo</div>
+                  )}
                   <div className="flex flex-1 flex-col justify-between gap-3">
                     <div className="flex items-start justify-between gap-4">
                       <div>
@@ -1087,23 +1336,35 @@ export function RestaurantApp() {
                         <p className="mt-2 max-w-xl text-sm leading-6 text-zinc-600">{item.description}</p>
                       </div>
                       <div className="text-right">
-                        <p className="text-xl font-black text-zinc-900">${item.price.toFixed(2)}</p>
+                        {item.discountPercent > 0 ? (
+                          <>
+                            <p className="text-sm text-zinc-500 line-through">${item.price.toFixed(2)}</p>
+                            <p className="text-xl font-black text-rose-700">${discountedPrice(item).toFixed(2)}</p>
+                            <p className="text-xs font-semibold text-rose-700">{item.discountPercent}% festival offer</p>
+                          </>
+                        ) : (
+                          <p className="text-xl font-black text-zinc-900">${item.price.toFixed(2)}</p>
+                        )}
                       </div>
                     </div>
 
                     <div className="flex items-center justify-between">
-                      <span className="text-sm text-zinc-500">Freshly prepared</span>
+                      <span className={`text-sm ${item.stockQuantity > 0 ? 'text-zinc-500' : 'font-semibold text-rose-700'}`}>
+                        {item.stockQuantity > 0 ? `${item.stockQuantity} available` : 'Out of stock'}
+                      </span>
                       <button
                         onClick={() => handleAddToCart(item)}
-                        className="rounded-full bg-zinc-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-orange-600"
+                        disabled={item.stockQuantity === 0 || (cart.find((entry) => entry.id === item.id)?.quantity ?? 0) >= item.stockQuantity}
+                        className="rounded-full bg-zinc-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-orange-600 disabled:cursor-not-allowed disabled:bg-zinc-300"
                       >
-                        Add to cart
+                        {item.stockQuantity === 0 ? 'Unavailable' : (cart.find((entry) => entry.id === item.id)?.quantity ?? 0) >= item.stockQuantity ? 'Stock in basket' : 'Add to cart'}
                       </button>
                     </div>
                   </div>
                 </article>
               ))}
             </div>
+            )}
           </section>
 
           <aside id="checkout" className="rounded-[28px] border border-zinc-200 bg-white p-5 shadow-sm sm:p-6">
@@ -1129,7 +1390,7 @@ export function RestaurantApp() {
                       <p className="font-semibold">{item.name}</p>
                       <p className="text-xs text-zinc-500">Qty {item.quantity} • {item.code || `FOOD-${item.id}`}</p>
                     </div>
-                    <p className="font-black text-zinc-900">${(item.price * item.quantity).toFixed(2)}</p>
+                    <p className="font-black text-zinc-900">${(discountedPrice(item) * item.quantity).toFixed(2)}</p>
                   </div>
                 ))
               )}
@@ -1168,8 +1429,10 @@ export function RestaurantApp() {
             </button>
           </aside>
         </div>
+        )}
 
-        <section className="mt-10 rounded-[28px] border border-zinc-200 bg-white p-5 shadow-sm sm:p-6">
+        {isConsumer && (
+        <section id="reservations" className="mt-10 rounded-[28px] border border-zinc-200 bg-white p-5 shadow-sm sm:p-6">
           <div className="mb-6 flex items-center justify-between">
             <div>
               <p className="text-sm font-semibold uppercase tracking-[0.2em] text-orange-600">Reservations</p>
@@ -1248,6 +1511,7 @@ export function RestaurantApp() {
             </div>
           </form>
         </section>
+        )}
       </section>
 
     </main>

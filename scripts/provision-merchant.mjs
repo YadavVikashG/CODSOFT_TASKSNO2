@@ -1,0 +1,127 @@
+import { randomBytes, scrypt } from 'node:crypto';
+import { createRequire } from 'node:module';
+import { promisify } from 'node:util';
+
+const require = createRequire(import.meta.url);
+const { Pool } = require('pg');
+const { loadEnvConfig } = require('@next/env');
+const scryptAsync = promisify(scrypt);
+
+const restaurants = {
+  saffron: { name: 'Saffron Street', email: 'saffron@zestmarket.com' },
+  green: { name: 'Green Bowl Co.', email: 'green@zestmarket.com' },
+  fire: { name: 'Fire & Stone', email: 'fire@zestmarket.com' },
+  bamboo: { name: 'Bamboo Wok', email: 'bamboo@zestmarket.com' },
+  mastercook: { name: 'mastercook Wok', email: 'mastercook@zestmarket.com' },
+};
+
+function readHidden(prompt) {
+  if (!process.stdin.isTTY || typeof process.stdin.setRawMode !== 'function') {
+    throw new Error('Run this command in an interactive terminal to enter the password securely.');
+  }
+
+  return new Promise((resolve, reject) => {
+    const input = process.stdin;
+    let value = '';
+    process.stdout.write(prompt);
+    input.setRawMode(true);
+    input.resume();
+
+    const finish = (error) => {
+      input.off('data', onData);
+      input.setRawMode(false);
+      input.pause();
+      process.stdout.write('\n');
+      if (error) reject(error);
+      else resolve(value);
+    };
+
+    const onData = (chunk) => {
+      for (const character of chunk.toString()) {
+        if (character === '\u0003') return finish(new Error('Cancelled.'));
+        if (character === '\r' || character === '\n') return finish();
+        if (character === '\u007f' || character === '\b') value = value.slice(0, -1);
+        else if (character >= ' ') value += character;
+      }
+    };
+
+    input.on('data', onData);
+  });
+}
+
+async function hashPassword(password) {
+  const salt = randomBytes(16).toString('hex');
+  const key = await scryptAsync(password, salt, 64);
+  return `scrypt$${salt}$${key.toString('hex')}`;
+}
+
+async function main() {
+  const [restaurantKey, ...nameParts] = process.argv.slice(2);
+  const profile = restaurants[restaurantKey];
+  const fullName = nameParts.join(' ').trim();
+
+  if (!profile || fullName.length < 2) {
+    throw new Error('Usage: node --env-file=.env.local scripts/provision-merchant.mjs <saffron|green|fire|bamboo|mastercook> "Manager Name"');
+  }
+
+  loadEnvConfig(process.cwd());
+  if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required.');
+
+  const password = await readHidden(`Set password for ${profile.email}: `);
+  if (password.length < 6) throw new Error('Password must be at least 6 characters long.');
+  const passwordHash = await hashPassword(password);
+  const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  });
+
+  try {
+    await pool.query('BEGIN');
+    const existingRestaurant = await pool.query(
+      'SELECT id FROM restaurants WHERE lower(name) = lower($1) LIMIT 1 FOR UPDATE',
+      [profile.name],
+    );
+    const restaurant = existingRestaurant.rows[0] || (await pool.query(
+      `INSERT INTO restaurants (name, cuisine, delivery_time, delivery_fee)
+       VALUES ($1, 'Cuisine not set', 'Set by restaurant', 0)
+       RETURNING id`,
+      [profile.name],
+    )).rows[0];
+
+    const existingUser = await pool.query(
+      'SELECT role FROM users WHERE lower(email) = lower($1) FOR UPDATE',
+      [profile.email],
+    );
+    if (existingUser.rows[0] && existingUser.rows[0].role !== 'restaurant') {
+      throw new Error(`An account with ${profile.email} already exists with another role.`);
+    }
+
+    if (existingUser.rows[0]) {
+      await pool.query(
+        `UPDATE users
+         SET full_name = $1, password_hash = $2, restaurant_id = $3
+         WHERE lower(email) = lower($4)`,
+        [fullName, passwordHash, restaurant.id, profile.email],
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO users (full_name, email, password_hash, role, restaurant_id)
+         VALUES ($1, $2, $3, 'restaurant', $4)`,
+        [fullName, profile.email, passwordHash, restaurant.id],
+      );
+    }
+
+    await pool.query('COMMIT');
+    console.log(`Merchant account created for ${profile.name}. Sign in at /login with ${profile.email}.`);
+  } catch (error) {
+    await pool.query('ROLLBACK');
+    throw error;
+  } finally {
+    await pool.end();
+  }
+}
+
+main().catch((error) => {
+  console.error(error instanceof Error ? error.message : 'Unable to create merchant account.');
+  process.exitCode = 1;
+});

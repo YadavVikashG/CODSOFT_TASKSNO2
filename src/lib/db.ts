@@ -1,6 +1,4 @@
 import { Pool } from 'pg';
-import { menuByRestaurant, restaurants, type Restaurant as FallbackRestaurant } from '@/lib/fallback-data';
-import { mockOrders } from '@/lib/mock-orders';
 
 export type RestaurantRow = {
   id: string;
@@ -10,8 +8,8 @@ export type RestaurantRow = {
   reviews: number;
   delivery_time: string;
   delivery_fee: number;
-  image: string;
-  tag: string;
+  image: string | null;
+  tag: string | null;
   featured: boolean;
   latitude: number | null;
   longitude: number | null;
@@ -35,15 +33,19 @@ export type MenuItemRow = {
   name: string;
   description: string;
   price: number;
+  stock_quantity: number;
+  discount_percent: number;
   spicy: boolean;
   veg: boolean;
   popular: boolean;
-  image: string;
+  image: string | null;
   code: string;
 };
 
 export type OrderRow = {
   id: string;
+  customer_user_id: string | null;
+  driver_user_id: string | null;
   customer_name: string;
   restaurant_name: string;
   restaurant_id: string | null;
@@ -62,75 +64,31 @@ export const pool = process.env.DATABASE_URL
   : null;
 
 export async function getRestaurants() {
-  if (!pool) {
-    return restaurants;
-  }
+  if (!pool) return [];
 
-  try {
-    const { rows } = await pool.query(
-            `SELECT id, name, cuisine, rating, reviews, delivery_time, delivery_fee, image, tag, featured,
-              latitude, longitude, offers_delivery, offers_dine_in
+  const { rows } = await pool.query(
+    `SELECT id, name, cuisine, rating, reviews, delivery_time, delivery_fee, image, tag, featured,
+            latitude, longitude, offers_delivery, offers_dine_in
        FROM restaurants
        ORDER BY featured DESC, rating DESC, name ASC`
-    );
+  );
 
-    if (rows.length === 0) {
-      return restaurants;
-    }
-
-    return rows.map((row: RestaurantRow) => ({
-      id: row.id,
-      name: row.name,
-      cuisine: row.cuisine,
-      rating: Number(row.rating),
-      reviews: Number(row.reviews),
-      deliveryTime: row.delivery_time,
-      fee: Number(row.delivery_fee),
-      image: row.image,
-      tag: row.tag,
-      featured: Boolean(row.featured),
-      latitude: row.latitude,
-      longitude: row.longitude,
-      offersDelivery: Boolean(row.offers_delivery),
-      offersDineIn: Boolean(row.offers_dine_in),
-    }));
-  } catch {
-    return restaurants;
-  }
-}
-
-function matchesFallbackRestaurant(restaurant: FallbackRestaurant, filters: RestaurantSearchFilters) {
-  const query = filters.query?.trim().toLocaleLowerCase();
-  if (query) {
-    const menuItems = menuByRestaurant[restaurant.id] ?? [];
-    const hasMatch = [restaurant.name, restaurant.cuisine, restaurant.tag, ...menuItems.flatMap((item) => [item.name, item.description])]
-      .some((value) => value.toLocaleLowerCase().includes(query));
-    if (!hasMatch) return false;
-  }
-
-  if (filters.mode === 'delivery' && !restaurant.offersDelivery) return false;
-  if (filters.mode === 'dine-in' && !restaurant.offersDineIn) return false;
-  if ((filters.minRating ?? 0) > restaurant.rating) return false;
-
-  if (filters.dietary && filters.dietary !== 'all') {
-    const menuItems = menuByRestaurant[restaurant.id] ?? [];
-    if (!menuItems.some((item) => filters.dietary === 'veg' ? item.veg === true : item.veg !== true)) {
-      return false;
-    }
-  }
-
-  if (filters.radiusKm && filters.latitude !== undefined && filters.longitude !== undefined) {
-    const radians = (degrees: number) => degrees * Math.PI / 180;
-    const latitudeDelta = radians(restaurant.latitude - filters.latitude);
-    const longitudeDelta = radians(restaurant.longitude - filters.longitude);
-    const haversine = Math.sin(latitudeDelta / 2) ** 2
-      + Math.cos(radians(filters.latitude)) * Math.cos(radians(restaurant.latitude))
-      * Math.sin(longitudeDelta / 2) ** 2;
-    const distanceKm = 6371 * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
-    if (distanceKm > filters.radiusKm) return false;
-  }
-
-  return true;
+  return rows.map((row: RestaurantRow) => ({
+    id: row.id,
+    name: row.name,
+    cuisine: row.cuisine,
+    rating: Number(row.rating),
+    reviews: Number(row.reviews),
+    deliveryTime: row.delivery_time,
+    fee: Number(row.delivery_fee),
+    image: row.image ?? '',
+    tag: row.tag ?? '',
+    featured: Boolean(row.featured),
+    latitude: row.latitude,
+    longitude: row.longitude,
+    offersDelivery: Boolean(row.offers_delivery),
+    offersDineIn: Boolean(row.offers_dine_in),
+  }));
 }
 
 export async function searchRestaurants(filters: RestaurantSearchFilters = {}) {
@@ -140,10 +98,9 @@ export async function searchRestaurants(filters: RestaurantSearchFilters = {}) {
     minRating: Math.max(0, Math.min(5, filters.minRating ?? 0)),
   };
 
-  if (!pool) return restaurants.filter((restaurant) => matchesFallbackRestaurant(restaurant, normalized));
+  if (!pool) return [];
 
-  try {
-    const { rows } = await pool.query<RestaurantRow>(
+  const { rows } = await pool.query<RestaurantRow>(
       `SELECT r.id, r.name, r.cuisine, r.rating, r.reviews, r.delivery_time, r.delivery_fee,
               r.image, r.tag, r.featured, r.latitude, r.longitude,
               r.offers_delivery, r.offers_dine_in
@@ -188,16 +145,7 @@ export async function searchRestaurants(filters: RestaurantSearchFilters = {}) {
       ],
     );
 
-    if (rows.length === 0) {
-      const { rows: countRows } = await pool.query<{ has_restaurants: boolean }>(
-        'SELECT EXISTS (SELECT 1 FROM restaurants) AS has_restaurants',
-      );
-      if (!countRows[0].has_restaurants) {
-        return restaurants.filter((restaurant) => matchesFallbackRestaurant(restaurant, normalized));
-      }
-    }
-
-    return rows.map((row) => ({
+  return rows.map((row) => ({
       id: row.id,
       name: row.name,
       cuisine: row.cuisine,
@@ -205,52 +153,41 @@ export async function searchRestaurants(filters: RestaurantSearchFilters = {}) {
       reviews: Number(row.reviews),
       deliveryTime: row.delivery_time,
       fee: Number(row.delivery_fee),
-      image: row.image,
-      tag: row.tag,
+      image: row.image ?? '',
+      tag: row.tag ?? '',
       featured: Boolean(row.featured),
       latitude: row.latitude,
       longitude: row.longitude,
       offersDelivery: Boolean(row.offers_delivery),
       offersDineIn: Boolean(row.offers_dine_in),
-    }));
-  } catch {
-    return restaurants.filter((restaurant) => matchesFallbackRestaurant(restaurant, normalized));
-  }
+  }));
 }
 
 export async function getMenuByRestaurantId(restaurantId: string) {
-  if (!pool) {
-    return menuByRestaurant[restaurantId] ?? [];
-  }
+  if (!pool) return [];
 
-  try {
-    const { rows } = await pool.query(
-      `SELECT id, restaurant_id, name, description, price, spicy, veg, popular, image, code
+  const { rows } = await pool.query(
+      `SELECT id, restaurant_id, name, description, price, stock_quantity, discount_percent, spicy, veg, popular, image, code
        FROM menu_items
        WHERE restaurant_id = $1
        ORDER BY popular DESC, name ASC`,
       [restaurantId]
     );
 
-    if (rows.length === 0) {
-      return menuByRestaurant[restaurantId] ?? [];
-    }
-
-    return rows.map((row: MenuItemRow) => ({
+  return rows.map((row: MenuItemRow) => ({
       id: row.id,
       restaurantId: row.restaurant_id,
       code: row.code,
       name: row.name,
       description: row.description,
       price: Number(row.price),
+      stockQuantity: Number(row.stock_quantity),
+      discountPercent: Number(row.discount_percent),
       spicy: Boolean(row.spicy),
       veg: Boolean(row.veg),
       popular: Boolean(row.popular),
-      image: row.image,
-    }));
-  } catch {
-    return menuByRestaurant[restaurantId] ?? [];
-  }
+      image: row.image ?? '',
+  }));
 }
 
 export async function createMenuItem(data: {
@@ -260,149 +197,262 @@ export async function createMenuItem(data: {
   price: number;
   image?: string;
   code?: string;
+  veg?: boolean;
+  spicy?: boolean;
+  stockQuantity: number;
+  discountPercent: number;
 }) {
-  if (!pool) {
-    const item = {
-      id: `menu-${Date.now()}`,
-      restaurantId: data.restaurantId,
-      code: data.code || `FALLBACK-${Date.now()}`,
-      name: data.name,
-      description: data.description,
-      price: data.price,
-      image: data.image || '',
-      spicy: false,
-      veg: true,
-      popular: true,
-    };
-    const restaurantEntry = menuByRestaurant[data.restaurantId] ?? [];
-    menuByRestaurant[data.restaurantId] = [item, ...restaurantEntry];
-    return item;
-  }
+  if (!pool) throw new Error('PostgreSQL must be configured to save menu items.');
 
-  try {
-    const { rows } = await pool.query(
-      `INSERT INTO menu_items (restaurant_id, name, description, price, spicy, veg, popular, image, code)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       RETURNING id, restaurant_id, name, description, price, spicy, veg, popular, image, code`,
+  const { rows } = await pool.query(
+      `INSERT INTO menu_items (restaurant_id, name, description, price, stock_quantity, discount_percent, spicy, veg, popular, image, code)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING id, restaurant_id, name, description, price, stock_quantity, discount_percent, spicy, veg, popular, image, code`,
       [
         data.restaurantId,
         data.name,
         data.description,
         data.price,
+        data.stockQuantity,
+        data.discountPercent,
+        data.spicy ?? false,
+        data.veg ?? false,
         false,
-        true,
-        true,
         data.image || '',
         data.code || `MENU-${Date.now()}`,
       ]
-    );
+  );
 
-    return rows[0];
-  } catch {
-    const item = {
-      id: `menu-${Date.now()}`,
-      restaurantId: data.restaurantId,
-      code: data.code || `FALLBACK-${Date.now()}`,
-      name: data.name,
-      description: data.description,
-      price: data.price,
-      image: data.image || '',
-      spicy: false,
-      veg: true,
-      popular: true,
-    };
-    const restaurantEntry = menuByRestaurant[data.restaurantId] ?? [];
-    menuByRestaurant[data.restaurantId] = [item, ...restaurantEntry];
-    return item;
-  }
+  return rows[0];
 }
 
-export async function getOrders() {
-  if (!pool) {
-    return mockOrders.map((order) => ({
-      id: order.id,
-      customer: order.customer,
-      restaurant: order.restaurant,
-      restaurantId: '',
-      item: order.item,
-      foodCode: 'FOOD-UNKNOWN',
-      total: Number(order.total),
-      status: order.status,
-      time: order.time,
-    }));
+export async function updateMenuItemForRestaurant(data: {
+  id: string;
+  restaurantId: string;
+  price: number;
+  stockQuantity: number;
+  discountPercent: number;
+}) {
+  if (!pool) throw new Error('PostgreSQL must be configured to update menu items.');
+
+  const { rows } = await pool.query(
+    `UPDATE menu_items
+     SET price = $3, stock_quantity = $4, discount_percent = $5
+     WHERE id = $1 AND restaurant_id = $2
+     RETURNING id, restaurant_id, name, description, price, stock_quantity, discount_percent, spicy, veg, popular, image, code`,
+    [data.id, data.restaurantId, data.price, data.stockQuantity, data.discountPercent],
+  );
+
+  if (!rows[0]) return null;
+  const row = rows[0] as MenuItemRow;
+  return {
+    id: row.id,
+    restaurantId: row.restaurant_id,
+    code: row.code,
+    name: row.name,
+    description: row.description,
+    price: Number(row.price),
+    stockQuantity: Number(row.stock_quantity),
+    discountPercent: Number(row.discount_percent),
+    spicy: Boolean(row.spicy),
+    veg: Boolean(row.veg),
+    popular: Boolean(row.popular),
+    image: row.image ?? '',
+  };
+}
+
+export async function deleteMenuItemForRestaurant(id: string, restaurantId: string) {
+  if (!pool) throw new Error('PostgreSQL must be configured to delete menu items.');
+  const { rowCount } = await pool.query(
+    'DELETE FROM menu_items WHERE id = $1 AND restaurant_id = $2',
+    [id, restaurantId],
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+function orderTime(createdAt: Date) {
+  const minutes = Math.max(0, Math.floor((Date.now() - new Date(createdAt).getTime()) / 60_000));
+  if (minutes < 1) return 'Just now';
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hr ago`;
+  return `${Math.floor(hours / 24)} days ago`;
+}
+
+function mapOrder(row: OrderRow) {
+  return {
+    id: row.id,
+    customer: row.customer_name,
+    restaurant: row.restaurant_name,
+    restaurantId: row.restaurant_id ?? '',
+    item: row.item_name,
+    foodCode: row.food_code ?? '',
+    total: Number(row.total),
+    status: row.status,
+    time: orderTime(row.created_at),
+  };
+}
+
+export async function getOrders(filters: { customerId?: string; restaurantId?: string } = {}) {
+  if (!pool) return [];
+
+  const conditions: string[] = [];
+  const values: string[] = [];
+  if (filters.customerId) {
+    values.push(filters.customerId);
+    conditions.push(`customer_user_id = $${values.length}`);
+  }
+  if (filters.restaurantId) {
+    values.push(filters.restaurantId);
+    conditions.push(`restaurant_id = $${values.length}`);
   }
 
-  try {
-    const { rows } = await pool.query(
-      `SELECT id, customer_name, restaurant_name, restaurant_id, item_name, food_code, total, status, created_at
-       FROM orders
-      ORDER BY created_at DESC`
-    );
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  const { rows } = await pool.query<OrderRow>(
+    `SELECT id, customer_user_id, customer_name, restaurant_name, restaurant_id, item_name, food_code, total, status, created_at
+     FROM orders ${where}
+     ORDER BY created_at DESC`,
+    values,
+  );
 
-    return rows.map((row: OrderRow) => ({
-      id: row.id,
-      customer: row.customer_name,
-      restaurant: row.restaurant_name,
-      restaurantId: row.restaurant_id ?? '',
-      item: row.item_name,
-      foodCode: row.food_code ?? 'FOOD-UNKNOWN',
-      total: Number(row.total),
-      status: row.status,
-      time: row.created_at ? 'Just now' : 'Just now',
-    }));
-  } catch {
-    return mockOrders.map((order) => ({
-      id: order.id,
-      customer: order.customer,
-      restaurant: order.restaurant,
-      restaurantId: '',
-      item: order.item,
-      foodCode: 'FOOD-UNKNOWN',
-      total: Number(order.total),
-      status: order.status,
-      time: order.time,
-    }));
+  return rows.map(mapOrder);
+}
+
+export async function getDeliveryJobs(driverId: string) {
+  if (!pool) return [];
+  const { rows } = await pool.query<OrderRow>(
+    `SELECT id, customer_user_id, driver_user_id, customer_name, restaurant_name, restaurant_id,
+            item_name, food_code, total, status, created_at
+     FROM orders
+     WHERE (status = 'Ready for pickup' AND driver_user_id IS NULL)
+        OR (driver_user_id = $1 AND status IN ('Ready for pickup', 'Picked Up'))
+     ORDER BY created_at ASC`,
+    [driverId],
+  );
+
+  return rows.map((row) => ({ ...mapOrder(row), assignedToMe: row.driver_user_id === driverId }));
+}
+
+export async function setDeliveryDuty(driverId: string, isOnDuty: boolean) {
+  if (!pool) throw new Error('PostgreSQL must be configured to update driver status.');
+  const { rowCount } = await pool.query(
+    "UPDATE users SET is_on_duty = $2 WHERE id = $1 AND role = 'delivery'",
+    [driverId, isOnDuty],
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+export async function transitionDeliveryOrder(
+  driverId: string,
+  orderId: string,
+  action: 'accept' | 'picked-up' | 'delivered',
+) {
+  if (!pool) throw new Error('PostgreSQL must be configured to update deliveries.');
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+    if (action === 'accept') {
+      const driver = await client.query<{ is_on_duty: boolean }>(
+        "SELECT is_on_duty FROM users WHERE id = $1 AND role = 'delivery' FOR UPDATE",
+        [driverId],
+      );
+      if (!driver.rows[0]?.is_on_duty) throw new Error('Go on duty before accepting a pickup.');
+    }
+
+    const nextState = action === 'picked-up' ? 'Picked Up' : action === 'delivered' ? 'Delivered' : 'Ready for pickup';
+    const { rows } = action === 'accept'
+      ? await client.query<OrderRow>(
+        `UPDATE orders SET driver_user_id = $1
+         WHERE id = $2 AND status = 'Ready for pickup' AND driver_user_id IS NULL
+         RETURNING id, customer_user_id, driver_user_id, customer_name, restaurant_name, restaurant_id, item_name, food_code, total, status, created_at`,
+        [driverId, orderId],
+      )
+      : await client.query<OrderRow>(
+        `UPDATE orders SET status = $3
+         WHERE id = $1 AND driver_user_id = $2
+           AND (($3 = 'Picked Up' AND status = 'Ready for pickup')
+             OR ($3 = 'Delivered' AND status = 'Picked Up'))
+         RETURNING id, customer_user_id, driver_user_id, customer_name, restaurant_name, restaurant_id, item_name, food_code, total, status, created_at`,
+        [orderId, driverId, nextState],
+      );
+
+    if (!rows[0]) throw new Error('This delivery is no longer available for that action.');
+    await client.query('COMMIT');
+    return { ...mapOrder(rows[0]), assignedToMe: true };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
 }
 
 export async function createOrder(data: {
+  customerId: string;
   customerName: string;
   restaurantName: string;
-  restaurantId?: string;
-  itemName: string;
-  foodCode?: string;
-  total: number;
+  restaurantId: string;
+  items: Array<{ id: string; quantity: number }>;
+  deliveryFee: number;
+  serviceFee: number;
   status?: string;
 }) {
-  if (!pool) {
-    return {
-      id: `ORD-${Date.now()}`,
-      customer: data.customerName,
-      restaurant: data.restaurantName,
-      restaurantId: data.restaurantId ?? '',
-      item: data.itemName,
-      foodCode: data.foodCode ?? 'FOOD-UNKNOWN',
-      total: data.total,
-      status: data.status ?? 'Preparing',
-      time: 'Just now',
-    };
-  }
+  if (!pool) throw new Error('PostgreSQL must be configured to save orders.');
 
+  const quantities = new Map<string, number>();
+  for (const line of data.items) {
+    if (!line.id || !Number.isInteger(line.quantity) || line.quantity < 1) {
+      throw new Error('Your cart contains an invalid item or quantity.');
+    }
+    quantities.set(line.id, (quantities.get(line.id) ?? 0) + line.quantity);
+  }
+  if (quantities.size === 0) throw new Error('Cart cannot be empty.');
+
+  const client = await pool.connect();
   try {
-    const { rows } = await pool.query(
-      `INSERT INTO orders (customer_name, restaurant_name, restaurant_id, item_name, food_code, total, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING id, customer_name, restaurant_name, restaurant_id, item_name, food_code, total, status, created_at`,
-      [
-        data.customerName,
-        data.restaurantName,
-        data.restaurantId || null,
-        data.itemName,
-        data.foodCode || 'FOOD-UNKNOWN',
-        data.total,
-        data.status ?? 'Preparing',
-      ]
+    await client.query('BEGIN');
+    const { rows: items } = await client.query<MenuItemRow>(
+      `SELECT id, restaurant_id, name, description, price, stock_quantity, discount_percent,
+              spicy, veg, popular, image, code
+       FROM menu_items
+       WHERE restaurant_id = $1 AND id = ANY($2::uuid[])
+       ORDER BY id
+       FOR UPDATE`,
+      [data.restaurantId, [...quantities.keys()]],
     );
+    if (items.length !== quantities.size) throw new Error('Your cart contains an unavailable item.');
+
+    const lines = items.map((item) => {
+      const quantity = quantities.get(item.id)!;
+      if (Number(item.stock_quantity) < quantity) {
+        throw new Error(`${item.name} has only ${item.stock_quantity} left in stock.`);
+      }
+      return {
+        item,
+        quantity,
+        lineTotal: Math.round(Number(item.price) * (1 - Number(item.discount_percent) / 100) * 100) / 100 * quantity,
+      };
+    });
+    const subtotal = lines.reduce((sum, line) => sum + line.lineTotal, 0);
+    const total = Math.round((subtotal + data.deliveryFee + data.serviceFee) * 100) / 100;
+
+    for (const { item, quantity } of lines) {
+      await client.query(
+        'UPDATE menu_items SET stock_quantity = stock_quantity - $2 WHERE id = $1',
+        [item.id, quantity],
+      );
+    }
+
+    const itemName = lines.map(({ item, quantity }) => `${item.name} x${quantity}`).join(', ').slice(0, 150);
+    const foodCode = lines.map(({ item }) => item.code).join(',').slice(0, 80);
+    const { rows } = await client.query(
+      `INSERT INTO orders (customer_user_id, customer_name, restaurant_name, restaurant_id, item_name, food_code, total, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id, customer_user_id, customer_name, restaurant_name, restaurant_id, item_name, food_code, total, status, created_at`,
+      [data.customerId, data.customerName, data.restaurantName, data.restaurantId, itemName, foodCode, total, data.status ?? 'Preparing'],
+    );
+    await client.query('COMMIT');
 
     const row = rows[0];
     return {
@@ -411,64 +461,52 @@ export async function createOrder(data: {
       restaurant: row.restaurant_name,
       restaurantId: row.restaurant_id ?? '',
       item: row.item_name,
-      foodCode: row.food_code ?? 'FOOD-UNKNOWN',
+      foodCode: row.food_code ?? '',
       total: Number(row.total),
       status: row.status,
-      time: 'Just now',
+      time: orderTime(row.created_at),
     };
-  } catch {
-    return {
-      id: `ORD-${Date.now()}`,
-      customer: data.customerName,
-      restaurant: data.restaurantName,
-      restaurantId: data.restaurantId ?? '',
-      item: data.itemName,
-      foodCode: data.foodCode ?? 'FOOD-UNKNOWN',
-      total: data.total,
-      status: data.status ?? 'Preparing',
-      time: 'Just now',
-    };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
 }
 
-export async function updateOrderStatusById(orderId: string, status: string) {
-  if (!pool) {
-    return { id: orderId, status };
-  }
+export async function updateOrderStatusById(orderId: string, status: string, restaurantId?: string) {
+  if (!pool) throw new Error('PostgreSQL must be configured to update orders.');
 
-  try {
-    const { rows } = await pool.query(
-      `UPDATE orders
+  const values: string[] = [orderId, status];
+  const restaurantCondition = restaurantId ? ' AND restaurant_id = $3' : '';
+  if (restaurantId) values.push(restaurantId);
+  const { rows } = await pool.query(
+        `UPDATE orders
        SET status = $2
-       WHERE id = $1
-       RETURNING id, customer_name, restaurant_name, restaurant_id, item_name, food_code, total, status, created_at`,
-      [orderId, status]
-    );
+       WHERE id = $1${restaurantCondition}
+         RETURNING id, customer_user_id, customer_name, restaurant_name, restaurant_id, item_name, food_code, total, status, created_at`,
+      values,
+  );
 
-    if (!rows[0]) {
-      throw new Error('Order not found.');
-    }
+  if (!rows[0]) throw new Error('Order not found.');
 
-    const row = rows[0];
-    return {
-      id: row.id,
-      customer: row.customer_name,
-      restaurant: row.restaurant_name,
-      restaurantId: row.restaurant_id ?? '',
-      item: row.item_name,
-      foodCode: row.food_code ?? 'FOOD-UNKNOWN',
-      total: Number(row.total),
-      status: row.status,
-      time: 'Updated',
-    };
-  } catch {
-    return { id: orderId, status };
-  }
+  const row = rows[0];
+  return {
+    id: row.id,
+    customer: row.customer_name,
+    restaurant: row.restaurant_name,
+    restaurantId: row.restaurant_id ?? '',
+    item: row.item_name,
+    foodCode: row.food_code ?? '',
+    total: Number(row.total),
+    status: row.status,
+    time: 'Updated',
+  };
 }
 
 export async function pingDatabase() {
   if (!pool) {
-    return { ok: false, message: 'PostgreSQL not configured. Using in-memory fallback data.' };
+    return { ok: false, message: 'PostgreSQL is not configured.' };
   }
 
   try {
