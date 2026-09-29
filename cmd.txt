@@ -1,3 +1,9 @@
+git config --global alias.save '!git add . && git commit -m "Update" && git push'
+above can do everythings for and update code on github
+gh auth login and unset GITHUB_TOKEN
+
+
+
 node --env-file=.env.local scripts/provision-delivery.mjs driver@example.com "Driver Name"
 node --env-file=.env.local scripts/provision-merchant.mjs mastercook "Restaurant Manager"
 node --env-file=.env.local scripts/provision-delivery.mjs driver2@example.com "Ram"
