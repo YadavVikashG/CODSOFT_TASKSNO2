@@ -301,3 +301,27 @@ img {
     transition: none;
   }
 }
+
+@media print {
+  body * {
+    visibility: hidden !important;
+  }
+
+  .reservation-print,
+  .reservation-print *,
+  .order-print,
+  .order-print * {
+    visibility: visible !important;
+  }
+
+  .reservation-print,
+  .order-print {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    border: 0;
+    padding: 24px;
+    color: #111;
+    background: white;
+  }
+}

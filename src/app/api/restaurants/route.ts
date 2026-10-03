@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
-import { searchRestaurants } from '@/lib/db';
+import { getAuthenticatedUser } from '@/lib/auth-session';
+import { pool, searchRestaurants } from '@/lib/db';
 
 function optionalNumber(value: string | null) {
   if (!value) return undefined;
@@ -29,5 +30,20 @@ export async function GET(request: Request) {
     longitude: hasValidLocation ? longitude : undefined,
   });
 
-  return NextResponse.json(restaurants);
+  const user = await getAuthenticatedUser(request);
+  if (!pool || user?.role !== 'user' || restaurants.length === 0) {
+    return NextResponse.json(restaurants);
+  }
+
+  const { rows } = await pool.query<{ restaurant_id: string; rating: number }>(
+    `SELECT restaurant_id, rating
+     FROM restaurant_reviews
+     WHERE user_id = $1 AND restaurant_id = ANY($2::uuid[])`,
+    [user.id, restaurants.map((restaurant) => restaurant.id)],
+  );
+  const userRatings = new Map(rows.map((row) => [row.restaurant_id, Number(row.rating)]));
+  return NextResponse.json(restaurants.map((restaurant) => ({
+    ...restaurant,
+    myRating: userRatings.get(restaurant.id) ?? 0,
+  })));
 }

@@ -35,6 +35,17 @@ ALTER TABLE users
   ADD COLUMN IF NOT EXISTS restaurant_id UUID REFERENCES restaurants(id) ON DELETE SET NULL;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_on_duty BOOLEAN NOT NULL DEFAULT FALSE;
 
+CREATE TABLE IF NOT EXISTS restaurant_reviews (
+  restaurant_id UUID NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  rating SMALLINT NOT NULL CHECK (rating BETWEEN 1 AND 5),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (restaurant_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_restaurant_reviews_user_id ON restaurant_reviews (user_id);
+
 INSERT INTO restaurants (name, cuisine, delivery_time, delivery_fee)
 SELECT profile.name, 'Cuisine not set', 'Set by restaurant', 0
 FROM (VALUES
@@ -151,13 +162,46 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS driver_user_id UUID REFERENCES users
 
 CREATE TABLE IF NOT EXISTS reservations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  restaurant_id UUID REFERENCES restaurants(id) ON DELETE CASCADE,
+  customer_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
   customer_name VARCHAR(150) NOT NULL,
   reservation_date DATE NOT NULL,
   reservation_time TIME NOT NULL,
   guests INTEGER NOT NULL,
   table_type VARCHAR(80) NOT NULL,
+  duration_minutes INTEGER NOT NULL DEFAULT 60,
+  source VARCHAR(20) NOT NULL DEFAULT 'online' CHECK (source IN ('online', 'walk-in')),
+  status VARCHAR(20) NOT NULL DEFAULT 'booked' CHECK (status IN ('booked', 'checked-in', 'cancelled', 'completed')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE reservations ADD COLUMN IF NOT EXISTS restaurant_id UUID REFERENCES restaurants(id) ON DELETE CASCADE;
+ALTER TABLE reservations ADD COLUMN IF NOT EXISTS customer_user_id UUID REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE reservations ADD COLUMN IF NOT EXISTS duration_minutes INTEGER NOT NULL DEFAULT 60;
+ALTER TABLE reservations ADD COLUMN IF NOT EXISTS source VARCHAR(20) NOT NULL DEFAULT 'online';
+ALTER TABLE reservations ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'booked';
+
+CREATE TABLE IF NOT EXISTS restaurant_seats (
+  restaurant_id UUID NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+  seat_number INTEGER NOT NULL CHECK (seat_number > 0),
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  PRIMARY KEY (restaurant_id, seat_number)
+);
+
+CREATE TABLE IF NOT EXISTS reservation_seats (
+  reservation_id UUID NOT NULL REFERENCES reservations(id) ON DELETE CASCADE,
+  restaurant_id UUID NOT NULL,
+  seat_number INTEGER NOT NULL,
+  PRIMARY KEY (reservation_id, seat_number),
+  FOREIGN KEY (restaurant_id, seat_number)
+    REFERENCES restaurant_seats(restaurant_id, seat_number) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_reservations_restaurant_slot
+  ON reservations (restaurant_id, reservation_date, reservation_time)
+  WHERE status IN ('booked', 'checked-in');
+CREATE INDEX IF NOT EXISTS idx_reservation_seats_seat
+  ON reservation_seats (restaurant_id, seat_number, reservation_id);
 
 CREATE INDEX IF NOT EXISTS idx_menu_items_restaurant_id ON menu_items(restaurant_id);
 CREATE INDEX IF NOT EXISTS idx_menu_items_search ON menu_items USING GIN (

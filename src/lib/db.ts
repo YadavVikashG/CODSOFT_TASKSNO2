@@ -474,6 +474,92 @@ export async function createOrder(data: {
   }
 }
 
+export async function createOrders(data: {
+  customerId: string;
+  customerName: string;
+  groups: Array<{
+    restaurantId: string;
+    restaurantName: string;
+    items: Array<{ id: string; quantity: number }>;
+    deliveryFee: number;
+    serviceFee: number;
+    status?: string;
+  }>;
+}) {
+  if (!pool) throw new Error('PostgreSQL must be configured to save orders.');
+  if (!data.groups.length) throw new Error('Cart cannot be empty.');
+
+  const groups = data.groups.map((group) => {
+    const quantities = new Map<string, number>();
+    for (const line of group.items) {
+      if (!line.id || !Number.isInteger(line.quantity) || line.quantity < 1 || line.quantity > 20) {
+        throw new Error('Your cart contains an invalid item or quantity.');
+      }
+      quantities.set(line.id, (quantities.get(line.id) ?? 0) + line.quantity);
+    }
+    if (!quantities.size) throw new Error('Cart cannot be empty.');
+    return { ...group, quantities };
+  }).sort((left, right) => left.restaurantId.localeCompare(right.restaurantId));
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const createdOrders = [];
+    for (const group of groups) {
+      const { rows: items } = await client.query<MenuItemRow>(
+        `SELECT id, restaurant_id, name, description, price, stock_quantity, discount_percent,
+                spicy, veg, popular, image, code
+         FROM menu_items
+         WHERE restaurant_id = $1 AND id = ANY($2::uuid[])
+         ORDER BY id
+         FOR UPDATE`,
+        [group.restaurantId, [...group.quantities.keys()]],
+      );
+      if (items.length !== group.quantities.size) throw new Error('Your cart contains an unavailable item.');
+
+      const lines = items.map((item) => {
+        const quantity = group.quantities.get(item.id)!;
+        if (Number(item.stock_quantity) < quantity) {
+          throw new Error(`${item.name} has only ${item.stock_quantity} left in stock.`);
+        }
+        return {
+          item,
+          quantity,
+          lineTotal: Math.round(Number(item.price) * (1 - Number(item.discount_percent) / 100) * 100) / 100 * quantity,
+        };
+      });
+      const subtotal = lines.reduce((sum, line) => sum + line.lineTotal, 0);
+      const total = Math.round((subtotal + group.deliveryFee + group.serviceFee) * 100) / 100;
+
+      for (const { item, quantity } of lines) {
+        await client.query(
+          'UPDATE menu_items SET stock_quantity = stock_quantity - $2 WHERE id = $1',
+          [item.id, quantity],
+        );
+      }
+
+      const itemName = lines.map(({ item, quantity }) => `${item.name} x${quantity}`).join(', ').slice(0, 150);
+      const foodCode = lines.map(({ item }) => item.code).join(',').slice(0, 80);
+      const { rows } = await client.query<OrderRow>(
+        `INSERT INTO orders (customer_user_id, customer_name, restaurant_name, restaurant_id, item_name, food_code, total, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING id, customer_user_id, customer_name, restaurant_name, restaurant_id,
+                   item_name, food_code, total, status, created_at`,
+        [data.customerId, data.customerName, group.restaurantName, group.restaurantId, itemName, foodCode, total, group.status ?? 'Preparing'],
+      );
+      createdOrders.push(mapOrder(rows[0]));
+    }
+
+    await client.query('COMMIT');
+    return createdOrders;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function updateOrderStatusById(orderId: string, status: string, restaurantId?: string) {
   if (!pool) throw new Error('PostgreSQL must be configured to update orders.');
 

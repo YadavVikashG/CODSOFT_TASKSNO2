@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import Link from 'next/link';
+import { usePathname, useRouter } from 'next/navigation';
 
 type Restaurant = {
   id: string;
@@ -16,6 +17,9 @@ type Restaurant = {
   featured: boolean;
   offersDelivery: boolean;
   offersDineIn: boolean;
+  latitude: number | null;
+  longitude: number | null;
+  myRating?: number;
 };
 
 type MenuItem = {
@@ -43,11 +47,30 @@ type Order = {
   item: string;
   foodCode?: string;
   total: number;
-  status: 'Preparing' | 'Ready for pickup' | 'Picked Up' | 'Out for delivery' | 'Delivered';
+  status: 'Preparing' | 'Ready for pickup' | 'Picked Up' | 'Out for delivery' | 'Delivered' | 'Dine-in';
   time: string;
 };
 
 type DeliveryJob = Order & { assignedToMe: boolean };
+
+type Reservation = {
+  id: string;
+  customer_name: string;
+  reservation_date: string;
+  reservation_time: string;
+  guests: number;
+  duration_minutes: number;
+  source: 'online' | 'walk-in';
+  status: string;
+  seats: number[];
+};
+
+type ReservationAvailability = {
+  seats: Array<{ number: number; available: boolean }>;
+  availableCount: number;
+  totalCount: number;
+  reservations: Reservation[];
+};
 
 type UserRole = 'user' | 'admin' | 'restaurant' | 'delivery';
 
@@ -68,10 +91,15 @@ function discountedPrice(item: Pick<MenuItem, 'price' | 'discountPercent'>) {
 
 export function RestaurantApp() {
   const router = useRouter();
+  const pathname = usePathname();
   const [restaurants, setRestaurants] = useState<Restaurant[]>([]);
+  const [catalogRestaurants, setCatalogRestaurants] = useState<Restaurant[]>([]);
   const [selectedRestaurantId, setSelectedRestaurantId] = useState('');
   const [menu, setMenu] = useState<MenuItem[]>([]);
+  const [catalogMenu, setCatalogMenu] = useState<MenuItem[]>([]);
   const [search, setSearch] = useState('');
+  const [menuRestaurantSearch, setMenuRestaurantSearch] = useState('');
+  const [menuRestaurantFilter, setMenuRestaurantFilter] = useState('all');
   const [searchMode, setSearchMode] = useState<'all' | 'delivery' | 'dine-in'>('all');
   const [dietaryPreference, setDietaryPreference] = useState<'all' | 'veg' | 'non-veg'>('all');
   const [minimumRating, setMinimumRating] = useState('0');
@@ -79,6 +107,9 @@ export function RestaurantApp() {
   const [searchLocation, setSearchLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const [locationMessage, setLocationMessage] = useState('');
   const [cart, setCart] = useState<CartItem[]>([]);
+  const [walkInCart, setWalkInCart] = useState<CartItem[]>([]);
+  const [walkInCustomerName, setWalkInCustomerName] = useState('');
+  const [printedOrder, setPrintedOrder] = useState<Order | null>(null);
   const [status, setStatus] = useState('Loading delicious options...');
   const [orders, setOrders] = useState<Order[]>([]);
   const [deliveryJobs, setDeliveryJobs] = useState<DeliveryJob[]>([]);
@@ -87,6 +118,25 @@ export function RestaurantApp() {
   const [sessionReady, setSessionReady] = useState(false);
   const [checkoutMessage, setCheckoutMessage] = useState('');
   const [reservationMessage, setReservationMessage] = useState('');
+  const [reservationRestaurantSearch, setReservationRestaurantSearch] = useState('');
+  const [reservationSelectedRestaurantId, setReservationSelectedRestaurantId] = useState('');
+  const [reservationSearchResults, setReservationSearchResults] = useState<Restaurant[]>([]);
+  const [restaurantLocationMessage, setRestaurantLocationMessage] = useState('');
+  const [restaurantRatingMessages, setRestaurantRatingMessages] = useState<Record<string, string>>({});
+  const [savingRatingRestaurantId, setSavingRatingRestaurantId] = useState('');
+  const [reservationAvailability, setReservationAvailability] = useState<ReservationAvailability | null>(null);
+  const [selectedSeatNumbers, setSelectedSeatNumbers] = useState<number[]>([]);
+  const [seatCapacity, setSeatCapacity] = useState('');
+  const [seatCapacityMessage, setSeatCapacityMessage] = useState('');
+  const [reservationReceipt, setReservationReceipt] = useState<{
+    id: string;
+    name: string;
+    date: string;
+    time: string;
+    guests: number;
+    duration: number;
+    seats: number[];
+  } | null>(null);
   const [restaurantDraft, setRestaurantDraft] = useState({
     name: '',
     description: '',
@@ -97,18 +147,58 @@ export function RestaurantApp() {
     image: '',
   });
   const [editingMenuItemId, setEditingMenuItemId] = useState('');
+  const [menuSearchDraft, setMenuSearchDraft] = useState('');
+  const [menuSearchTerm, setMenuSearchTerm] = useState('');
+  const [orderSearchDraft, setOrderSearchDraft] = useState('');
+  const [orderSearchTerm, setOrderSearchTerm] = useState('');
   const [inventoryDraft, setInventoryDraft] = useState({ price: '', stockQuantity: '', discountPercent: '' });
   const [reservationForm, setReservationForm] = useState({
     name: '',
     date: '',
     time: '',
-    guests: '2 Guests',
+    guests: '2',
+    duration: '60',
     tableType: 'Window',
   });
 
   const restaurantDashboardId = user?.role === 'restaurant'
     ? user.restaurantId || ''
     : selectedRestaurantId;
+  const reservationRestaurantId = user?.role === 'restaurant'
+    ? restaurantDashboardId
+    : reservationSelectedRestaurantId || reservationSearchResults[0]?.id || '';
+  const reservationRestaurant = reservationSearchResults.find((restaurant) => restaurant.id === reservationRestaurantId)
+    ?? restaurants.find((restaurant) => restaurant.id === reservationRestaurantId);
+  const matchingReservationRestaurants = reservationSearchResults;
+  const merchantView = user?.role === 'restaurant' && pathname.startsWith('/restaurant/')
+    ? pathname.split('/')[2]
+    : '';
+  const showMerchantOrders = !merchantView || merchantView === 'orders';
+  const showMerchantMenu = !merchantView || merchantView === 'menu';
+  const showMerchantSeating = !merchantView || merchantView === 'seating';
+  const customerRoutes = ['discover', 'menu', 'reservations', 'order-history'];
+  const customerView = customerRoutes.includes(pathname.slice(1)) ? pathname.slice(1) : '';
+  const isConsumer = user?.role === 'user';
+  const showCustomerDiscover = !customerView || customerView === 'discover';
+  const showCustomerMenu = !customerView || customerView === 'menu';
+  const showCustomerReservations = !customerView || customerView === 'reservations';
+  const showCustomerHistory = !customerView || customerView === 'order-history';
+  const filteredMenu = menu.filter((item) =>
+    `${item.name} ${item.description} ${item.code || ''}`.toLowerCase().includes(menuSearchTerm.toLowerCase()),
+  );
+  const visibleCatalogMenu = catalogMenu.filter((item) => {
+    const restaurant = catalogRestaurants.find((entry) => entry.id === item.restaurantId);
+    const matchesRestaurant = menuRestaurantFilter === 'all' || item.restaurantId === menuRestaurantFilter;
+    const matchesSearch = !search.trim() || `${item.name} ${item.description} ${item.code || ''} ${restaurant?.name || ''} ${restaurant?.cuisine || ''}`
+      .toLowerCase()
+      .includes(search.trim().toLowerCase());
+    return matchesRestaurant && matchesSearch;
+  });
+
+  useEffect(() => {
+    if (!sessionReady || !customerView || isConsumer) return;
+    router.replace('/login');
+  }, [sessionReady, customerView, isConsumer, router]);
 
   useEffect(() => {
     const loadOrders = async () => {
@@ -179,6 +269,30 @@ export function RestaurantApp() {
   }, [search, searchMode, dietaryPreference, minimumRating, radiusKm, searchLocation]);
 
   useEffect(() => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      try {
+        const params = new URLSearchParams({ q: reservationRestaurantSearch, mode: 'dine-in' });
+        const response = await fetch(`/api/restaurants?${params}`, { signal: controller.signal });
+        const data: Restaurant[] = await response.json();
+        if (!response.ok) throw new Error('Unable to search dine-in restaurants.');
+        setReservationSearchResults(data);
+        setReservationSelectedRestaurantId((current) =>
+          data.some((restaurant) => restaurant.id === current) ? current : data[0]?.id || '',
+        );
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') return;
+        if (!controller.signal.aborted) setReservationSearchResults([]);
+      }
+    }, 200);
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [reservationRestaurantSearch]);
+
+  useEffect(() => {
     if (!restaurantDashboardId) return;
 
     const loadMenu = async () => {
@@ -194,6 +308,88 @@ export function RestaurantApp() {
 
     void loadMenu();
   }, [restaurantDashboardId]);
+
+  useEffect(() => {
+    if (user?.role !== 'user' || pathname !== '/menu') return;
+    const controller = new AbortController();
+    const loadCatalog = async () => {
+      try {
+        const restaurantResponse = await fetch('/api/restaurants?mode=all&dietary=all&minRating=0', { signal: controller.signal });
+        if (!restaurantResponse.ok) throw new Error('Unable to load restaurants.');
+        const allRestaurants: Restaurant[] = await restaurantResponse.json();
+        if (controller.signal.aborted) return;
+        setCatalogRestaurants(allRestaurants);
+        const menus = await Promise.all(allRestaurants.map(async (restaurant) => {
+          const restaurantId = restaurant.id;
+          const response = await fetch(`/api/menu/${restaurantId}`, { signal: controller.signal });
+          if (!response.ok) throw new Error('Unable to load restaurant menu.');
+          return response.json() as Promise<MenuItem[]>;
+        }));
+        if (!controller.signal.aborted) setCatalogMenu(menus.flat());
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') return;
+        if (!controller.signal.aborted) {
+          setCatalogRestaurants([]);
+          setCatalogMenu([]);
+        }
+      }
+    };
+
+    void loadCatalog();
+    return () => controller.abort();
+  }, [pathname, user?.role]);
+
+  useEffect(() => {
+    if (user?.role !== 'restaurant' || !restaurantDashboardId) return;
+    const controller = new AbortController();
+    void fetch(`/api/reservations?restaurantId=${restaurantDashboardId}&capacity=true`, { signal: controller.signal })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Unable to load seat capacity.');
+        setSeatCapacity((current) => current || String(data.seatCount));
+      })
+      .catch((error) => {
+        if (error instanceof DOMException && error.name === 'AbortError') return;
+        setSeatCapacityMessage(error instanceof Error ? error.message : 'Unable to load seat capacity.');
+      });
+    return () => controller.abort();
+  }, [user?.role, restaurantDashboardId]);
+
+  useEffect(() => {
+    if (!reservationRestaurantId || !reservationForm.date || !reservationForm.time) return;
+
+    let active = true;
+    const controller = new AbortController();
+    const loadAvailability = async () => {
+      try {
+        const params = new URLSearchParams({
+          restaurantId: reservationRestaurantId,
+          date: reservationForm.date,
+          time: reservationForm.time,
+          duration: reservationForm.duration,
+        });
+        const response = await fetch(`/api/reservations?${params}`, { signal: controller.signal });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Unable to load seat availability.');
+        if (!active) return;
+        setReservationAvailability(data);
+        if (user?.role === 'restaurant') {
+          setSeatCapacity((current) => current || String(data.totalCount));
+        }
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') return;
+        if (active) setReservationAvailability(null);
+      }
+    };
+
+    void loadAvailability();
+    const interval = window.setInterval(loadAvailability, 12000);
+    return () => {
+      active = false;
+      controller.abort();
+      window.clearInterval(interval);
+    };
+  }, [reservationRestaurantId, reservationForm.date, reservationForm.time, reservationForm.duration, user?.role]);
 
   const filteredRestaurants = restaurants;
 
@@ -213,20 +409,80 @@ export function RestaurantApp() {
     );
   };
 
+  const handleSetRestaurantLocation = () => {
+    if (!navigator.geolocation) {
+      setRestaurantLocationMessage('Location is unavailable in this browser.');
+      return;
+    }
+    setRestaurantLocationMessage('Requesting this device’s location…');
+    navigator.geolocation.getCurrentPosition(async ({ coords }) => {
+      try {
+        const response = await fetch('/api/restaurants/location', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ latitude: coords.latitude, longitude: coords.longitude }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Unable to save restaurant location.');
+        setRestaurants((current) => current.map((restaurant) => restaurant.id === restaurantDashboardId
+          ? { ...restaurant, latitude: data.latitude, longitude: data.longitude }
+          : restaurant));
+        setRestaurantLocationMessage(`Restaurant location saved (${data.latitude.toFixed(5)}, ${data.longitude.toFixed(5)}).`);
+      } catch (error) {
+        setRestaurantLocationMessage(error instanceof Error ? error.message : 'Unable to save restaurant location.');
+      }
+    }, () => setRestaurantLocationMessage('Location permission was denied or unavailable.'), {
+      enableHighAccuracy: true,
+      timeout: 12000,
+    });
+  };
+
+  const handleRateRestaurant = async (restaurantId: string, rating: number) => {
+    setSavingRatingRestaurantId(restaurantId);
+    setRestaurantRatingMessages((current) => ({ ...current, [restaurantId]: '' }));
+    try {
+      const response = await fetch(`/api/restaurants/${restaurantId}/rating`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rating }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Unable to save your rating.');
+      const updateRating = (restaurant: Restaurant) => restaurant.id === restaurantId
+        ? { ...restaurant, rating: data.rating, reviews: data.reviews, myRating: data.myRating }
+        : restaurant;
+      setRestaurants((current) => current.map(updateRating));
+      setCatalogRestaurants((current) => current.map(updateRating));
+      setRestaurantRatingMessages((current) => ({ ...current, [restaurantId]: 'Rating saved.' }));
+    } catch (error) {
+      setRestaurantRatingMessages((current) => ({
+        ...current,
+        [restaurantId]: error instanceof Error ? error.message : 'Unable to save your rating.',
+      }));
+    } finally {
+      setSavingRatingRestaurantId('');
+    }
+  };
+
   const subtotal = cart.reduce((sum, item) =>
     sum + discountedPrice(item) * item.quantity,
   0);
-  const deliveryFee = cart.length > 0
-    ? restaurants.find((restaurant) => restaurant.id === selectedRestaurantId)?.fee ?? 0
-    : 0;
-  const serviceFee = cart.length > 0 ? 2.5 : 0;
+  const cartRestaurantIds = [...new Set(cart.map((item) => item.restaurantId))];
+  const deliveryFee = cartRestaurantIds.reduce((sum, restaurantId) =>
+    sum + (catalogRestaurants.find((restaurant) => restaurant.id === restaurantId)?.fee
+      ?? restaurants.find((restaurant) => restaurant.id === restaurantId)?.fee
+      ?? 0),
+  0);
+  const serviceFee = cartRestaurantIds.length * 2.5;
   const total = subtotal + deliveryFee + serviceFee;
+  const walkInTotal = walkInCart.reduce((sum, item) => sum + discountedPrice(item) * item.quantity, 0);
 
   const handleAddToCart = (item: MenuItem) => {
     if (!user || user.role !== 'user') {
       alert('Sign in with a customer account to order food.');
       return;
     }
+    setSelectedRestaurantId(item.restaurantId);
 
     setCart((current) => {
       const existing = current.find((entry) => entry.id === item.id);
@@ -244,8 +500,22 @@ export function RestaurantApp() {
     });
   };
 
+  const handleAddToWalkInCart = (item: MenuItem) => {
+    setWalkInCart((current) => {
+      const existing = current.find((entry) => entry.id === item.id);
+      if ((existing?.quantity ?? 0) >= item.stockQuantity) return current;
+      if (existing) {
+        return current.map((entry) => entry.id === item.id ? { ...entry, quantity: entry.quantity + 1 } : entry);
+      }
+      return [...current, { ...item, quantity: 1 }];
+    });
+  };
+
   const selectedRestaurant =
-    restaurants.find((restaurant) => restaurant.id === restaurantDashboardId) ?? restaurants[0];
+    restaurants.find((restaurant) => restaurant.id === restaurantDashboardId)
+      ?? catalogRestaurants.find((restaurant) => restaurant.id === restaurantDashboardId)
+      ?? restaurants[0]
+      ?? catalogRestaurants[0];
 
   const restaurantMetrics = useMemo(() => {
     const averageRating = restaurants.length
@@ -262,6 +532,11 @@ export function RestaurantApp() {
 
   const restaurantOrders = orders.filter((order) =>
     order.restaurantId ? order.restaurantId === restaurantDashboardId : order.restaurant === selectedRestaurant?.name,
+  );
+  const filteredRestaurantOrders = restaurantOrders.filter((order) =>
+    `${order.customer} ${order.item} ${order.foodCode || ''} ${order.status} ${order.id}`
+      .toLowerCase()
+      .includes(orderSearchTerm.toLowerCase()),
   );
   const userOrderHistory = user
     ? orders.filter((order) => order.customer.toLowerCase() === user.name.toLowerCase())
@@ -510,18 +785,11 @@ export function RestaurantApp() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          customer: user.name,
-          restaurant: selectedRestaurant?.name ?? 'Selected restaurant',
-          restaurantId: selectedRestaurant?.id ?? '',
           items: cart.map((item) => ({
             id: item.id,
-            name: item.name,
             quantity: item.quantity,
-            price: item.price,
-            foodCode: item.code || `FOOD-${item.id}`,
+            restaurantId: item.restaurantId,
           })),
-          total,
-          status: 'Preparing',
         }),
       });
 
@@ -530,14 +798,44 @@ export function RestaurantApp() {
         throw new Error(data.error || 'Unable to place your order.');
       }
 
-      setOrders((current) => [data.order, ...current]);
+      setOrders((current) => [...data.orders, ...current]);
       setCart([]);
-      const updatedMenu = await fetch(`/api/menu/${selectedRestaurantId}`).then((result) => result.json());
-      setMenu(updatedMenu);
-      setCheckoutMessage('Order placed successfully! Kitchen has received it.');
+      const updatedMenus = await Promise.all(catalogRestaurants.map(async (restaurant) => {
+        const result = await fetch(`/api/menu/${restaurant.id}`);
+        return result.json() as Promise<MenuItem[]>;
+      }));
+      const refreshedCatalog = updatedMenus.flat();
+      setCatalogMenu(refreshedCatalog);
+      setMenu(refreshedCatalog.filter((item) => item.restaurantId === selectedRestaurantId));
+      setCheckoutMessage(`Order placed with ${data.orders.length} restaurant${data.orders.length === 1 ? '' : 's'}.`);
       setTimeout(() => setCheckoutMessage(''), 3000);
     } catch (error) {
       alert(error instanceof Error ? error.message : 'Unable to place your order.');
+    }
+  };
+
+  const handleWalkInSale = async () => {
+    if (!walkInCart.length || user?.role !== 'restaurant') return;
+    try {
+      const response = await fetch('/api/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source: 'walk-in',
+          customerName: walkInCustomerName,
+          items: walkInCart.map((item) => ({ id: item.id, quantity: item.quantity })),
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Unable to record in-person sale.');
+      setOrders((current) => [data.order, ...current]);
+      setPrintedOrder(data.order);
+      setWalkInCart([]);
+      setWalkInCustomerName('');
+      const updatedMenu = await fetch(`/api/menu/${restaurantDashboardId}`).then((result) => result.json());
+      setMenu(updatedMenu);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Unable to record in-person sale.');
     }
   };
 
@@ -549,11 +847,15 @@ export function RestaurantApp() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          restaurantId: reservationRestaurantId,
           name: reservationForm.name || user?.name || 'Guest',
           date: reservationForm.date,
           time: reservationForm.time,
-          guests: reservationForm.guests,
+          guests: Number(reservationForm.guests),
+          duration: Number(reservationForm.duration),
+          seats: selectedSeatNumbers,
           tableType: reservationForm.tableType,
+          source: user?.role === 'restaurant' ? 'walk-in' : 'online',
         }),
       });
 
@@ -562,21 +864,49 @@ export function RestaurantApp() {
         throw new Error(data.error || 'Unable to reserve a table.');
       }
 
-      setReservationMessage(`Table reserved for ${reservationForm.guests} on ${reservationForm.date} at ${reservationForm.time}.`);
-      setReservationForm({
-        name: '',
-        date: '',
-        time: '',
-        guests: '2 Guests',
-        tableType: 'Window',
+      const booked = data.reservation;
+      const seats = (booked.seats as number[]).map(Number);
+      setPrintedOrder(null);
+      setReservationReceipt({
+        id: booked.id,
+        name: booked.customer_name,
+        date: String(booked.reservation_date).slice(0, 10),
+        time: String(booked.reservation_time).slice(0, 5),
+        guests: Number(booked.guests),
+        duration: Number(booked.duration_minutes),
+        seats,
       });
+      setReservationMessage(`Seats ${seats.join(', ')} confirmed for ${reservationForm.date} at ${reservationForm.time}.`);
+      setSelectedSeatNumbers([]);
+      const params = new URLSearchParams({
+        restaurantId: reservationRestaurantId,
+        date: reservationForm.date,
+        time: reservationForm.time,
+        duration: reservationForm.duration,
+      });
+      const availabilityResponse = await fetch(`/api/reservations?${params}`);
+      if (availabilityResponse.ok) setReservationAvailability(await availabilityResponse.json());
     } catch (error) {
-      alert(error instanceof Error ? error.message : 'Unable to reserve a table.');
+      setReservationMessage(error instanceof Error ? error.message : 'Unable to reserve a table.');
     }
   };
 
-  const activeRole = user?.role ?? 'user';
-  const isConsumer = !user || user.role === 'user';
+  const handleSeatCapacityUpdate = async () => {
+    try {
+      const response = await fetch('/api/reservations', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ seatCount: Number(seatCapacity) }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Unable to update seating capacity.');
+      setSeatCapacity(String(data.seatCount));
+      setSeatCapacityMessage(`Seating capacity updated to ${data.seatCount} seats.`);
+      setReservationMessage('');
+    } catch (error) {
+      setSeatCapacityMessage(error instanceof Error ? error.message : 'Unable to update seating capacity.');
+    }
+  };
 
   if (!sessionReady) {
     return <main className="grid min-h-screen place-items-center bg-[#fffaf5] text-sm text-zinc-600">Loading your workspace…</main>;
@@ -598,18 +928,19 @@ export function RestaurantApp() {
             </div>
 
             <nav className="flex flex-wrap items-center gap-3 text-sm font-medium text-zinc-600">
-              {(!user || user.role === 'user') && (
+              {user?.role === 'user' && (
                 <>
-                  <a href="#featured" className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">Discover</a>
-                  <a href="#restaurants" className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">Menu</a>
-                  <a href="#checkout" className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">Basket</a>
-                  <a href="#reservations" className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">Reservations</a>
+                  <Link href="/discover" aria-current={customerView === 'discover' ? 'page' : undefined} className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">Discover</Link>
+                  <Link href="/menu" aria-current={customerView === 'menu' ? 'page' : undefined} className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">Menu</Link>
+                  <Link href="/reservations" aria-current={customerView === 'reservations' ? 'page' : undefined} className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">Reservations</Link>
+                  <Link href="/order-history" aria-current={customerView === 'order-history' ? 'page' : undefined} className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">Order history</Link>
                 </>
               )}
               {user?.role === 'restaurant' && (
                 <>
-                  <a href="#merchant-orders" className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">Orders</a>
-                  <a href="#merchant-menu" className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">Menu</a>
+                  <Link href="/restaurant/orders" aria-current={merchantView === 'orders' ? 'page' : undefined} className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">Orders</Link>
+                  <Link href="/restaurant/menu" aria-current={merchantView === 'menu' ? 'page' : undefined} className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">Menu</Link>
+                  <Link href="/restaurant/seating" aria-current={merchantView === 'seating' ? 'page' : undefined} className="rounded-full px-3 py-2 hover:bg-orange-50 hover:text-orange-700">Seating</Link>
                 </>
               )}
               {user?.role === 'admin' && (
@@ -731,24 +1062,29 @@ export function RestaurantApp() {
                       <p className="mt-1 text-sm text-zinc-500">Customer: {job.customer} · {job.time}</p>
                       <p className="mt-1 text-sm text-zinc-600">Order total ${job.total.toFixed(2)} · {job.status}</p>
                     </div>
-                    {!job.assignedToMe ? (
-                      <button
-                        type="button"
-                        disabled={!user.isOnDuty}
-                        onClick={() => handleDeliveryAction(job, 'accept')}
-                        className="rounded bg-sky-700 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
-                      >
-                        Accept pickup
+                    <div className="flex flex-wrap gap-2">
+                      {!job.assignedToMe ? (
+                        <button
+                          type="button"
+                          disabled={!user.isOnDuty}
+                          onClick={() => handleDeliveryAction(job, 'accept')}
+                          className="rounded bg-sky-700 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
+                        >
+                          Accept pickup
+                        </button>
+                      ) : job.status === 'Ready for pickup' ? (
+                        <button type="button" onClick={() => handleDeliveryAction(job, 'picked-up')} className="rounded bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800">
+                          Mark picked up
+                        </button>
+                      ) : (
+                        <button type="button" onClick={() => handleDeliveryAction(job, 'delivered')} className="rounded bg-zinc-900 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-700">
+                          Mark delivered
+                        </button>
+                      )}
+                      <button type="button" onClick={() => setPrintedOrder(job)} className="rounded border border-zinc-300 px-3 py-2 text-sm font-semibold hover:bg-zinc-100">
+                        Print ticket
                       </button>
-                    ) : job.status === 'Ready for pickup' ? (
-                      <button type="button" onClick={() => handleDeliveryAction(job, 'picked-up')} className="rounded bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800">
-                        Mark picked up
-                      </button>
-                    ) : (
-                      <button type="button" onClick={() => handleDeliveryAction(job, 'delivered')} className="rounded bg-zinc-900 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-700">
-                        Mark delivered
-                      </button>
-                    )}
+                    </div>
                   </article>
                 ))}
               </div>
@@ -756,7 +1092,7 @@ export function RestaurantApp() {
           </section>
         )}
 
-        {(!user || user.role === 'user') && (
+        {isConsumer && showCustomerDiscover && (
         <div className="mb-10 overflow-hidden rounded-[32px] bg-gradient-to-br from-zinc-900 via-zinc-800 to-orange-900 p-8 text-white shadow-xl shadow-orange-100 sm:p-12">
           <div className="grid gap-10 lg:grid-cols-[1.2fr_0.8fr] lg:items-center">
             <div>
@@ -895,14 +1231,39 @@ export function RestaurantApp() {
           </section>
         )}
 
-        {user?.role === 'restaurant' && (
+        {user?.role === 'restaurant' && showMerchantOrders && (
           <section id="merchant-orders" className="mb-10 border-b border-zinc-200 pb-8">
-            <h2 className="mb-4 text-2xl font-black">Incoming orders</h2>
+            <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+              <h2 className="text-2xl font-black">Incoming orders</h2>
+              <span className="text-sm text-zinc-500">{filteredRestaurantOrders.length} of {restaurantOrders.length} orders</span>
+            </div>
+            <form
+              role="search"
+              onSubmit={(event) => {
+                event.preventDefault();
+                setOrderSearchTerm(orderSearchDraft.trim());
+              }}
+              className="mb-4 flex max-w-xl gap-2"
+            >
+              <input
+                value={orderSearchDraft}
+                onChange={(event) => setOrderSearchDraft(event.target.value)}
+                placeholder="Search guest, item, code, status, or order ID"
+                aria-label="Search incoming orders"
+                className="min-w-0 flex-1 rounded border border-zinc-300 bg-white px-3 py-2.5 outline-none focus:border-emerald-700"
+              />
+              <button type="submit" className="rounded bg-zinc-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-zinc-700">Search</button>
+              {orderSearchTerm && (
+                <button type="button" onClick={() => { setOrderSearchDraft(''); setOrderSearchTerm(''); }} className="rounded border border-zinc-300 px-3 py-2.5 text-sm font-semibold hover:bg-zinc-100">Clear</button>
+              )}
+            </form>
             {restaurantOrders.length === 0 ? (
               <p className="bg-white px-5 py-8 text-sm text-zinc-600">No orders for your restaurant yet.</p>
+            ) : filteredRestaurantOrders.length === 0 ? (
+              <p className="border border-dashed border-zinc-300 bg-white px-5 py-8 text-sm text-zinc-600">No incoming orders match this search.</p>
             ) : (
               <div className="divide-y divide-zinc-200 bg-white">
-                {restaurantOrders.map((order) => (
+                {filteredRestaurantOrders.map((order) => (
                   <div key={order.id} className="flex flex-wrap items-center justify-between gap-3 px-4 py-4">
                     <div>
                       <p className="font-semibold">{order.item}</p>
@@ -910,6 +1271,9 @@ export function RestaurantApp() {
                     </div>
                     <div className="flex items-center gap-3">
                       <span className="text-sm text-zinc-600">${order.total.toFixed(2)} · {order.status}</span>
+                      <button type="button" onClick={() => setPrintedOrder(order)} className="rounded border border-zinc-300 px-3 py-2 text-sm font-semibold hover:bg-zinc-100">
+                        Print ticket
+                      </button>
                       {order.status === 'Preparing' && (
                         <button
                           onClick={() => handleStatusUpdate(order.id, 'Ready for pickup')}
@@ -926,7 +1290,72 @@ export function RestaurantApp() {
           </section>
         )}
 
-        {user?.role === 'restaurant' && (
+        {user?.role === 'restaurant' && showMerchantOrders && (
+          <section id="walk-in-pos" className="mb-10 border-b border-zinc-200 pb-8">
+            <div className="mb-4">
+              <p className="text-xs font-bold uppercase text-emerald-800">In-person sales</p>
+              <h2 className="mt-1 text-2xl font-black">Walk-in checkout</h2>
+            </div>
+            <div className="grid gap-6 lg:grid-cols-2">
+              <div className="divide-y divide-zinc-200 border-y border-zinc-200 bg-white">
+                {menu.length === 0 ? (
+                  <p className="px-4 py-6 text-sm text-zinc-600">Add menu items before recording a sale.</p>
+                ) : menu.map((item) => (
+                  <div key={item.id} className="flex items-center justify-between gap-3 px-4 py-3">
+                    <div>
+                      <p className="font-semibold">{item.name}</p>
+                      <p className="text-sm text-zinc-600">${discountedPrice(item).toFixed(2)} · {item.stockQuantity} in stock</p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={item.stockQuantity === 0 || (walkInCart.find((line) => line.id === item.id)?.quantity ?? 0) >= item.stockQuantity}
+                      onClick={() => handleAddToWalkInCart(item)}
+                      className="rounded border border-emerald-700 px-3 py-2 text-sm font-semibold text-emerald-900 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:border-zinc-300 disabled:text-zinc-400"
+                    >
+                      Add
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <div className="border-y border-zinc-200 px-4 py-4">
+                <label className="grid gap-1 text-sm font-semibold text-zinc-700">
+                  Guest name
+                  <input
+                    value={walkInCustomerName}
+                    onChange={(event) => setWalkInCustomerName(event.target.value)}
+                    placeholder="Walk-in guest"
+                    className="rounded border border-zinc-300 px-3 py-2.5"
+                  />
+                </label>
+                <div className="mt-4 divide-y divide-zinc-200">
+                  {walkInCart.length === 0 ? (
+                    <p className="py-5 text-sm text-zinc-600">No items in this sale.</p>
+                  ) : walkInCart.map((item) => (
+                    <div key={item.id} className="flex items-center justify-between gap-3 py-3 text-sm">
+                      <div>
+                        <p className="font-semibold">{item.name}</p>
+                        <p className="text-zinc-600">${(discountedPrice(item) * item.quantity).toFixed(2)}</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button type="button" aria-label={`Remove one ${item.name}`} onClick={() => setWalkInCart((current) => current.flatMap((line) => line.id !== item.id ? [line] : line.quantity > 1 ? [{ ...line, quantity: line.quantity - 1 }] : []))} className="h-8 w-8 border border-zinc-300 font-bold">−</button>
+                        <span className="w-5 text-center">{item.quantity}</span>
+                        <button type="button" aria-label={`Add one ${item.name}`} disabled={item.quantity >= item.stockQuantity} onClick={() => handleAddToWalkInCart(item)} className="h-8 w-8 border border-zinc-300 font-bold disabled:text-zinc-300">+</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-3 flex justify-between border-t border-zinc-300 pt-3 font-bold">
+                  <span>Total</span><span>${walkInTotal.toFixed(2)}</span>
+                </div>
+                <button type="button" disabled={walkInCart.length === 0} onClick={handleWalkInSale} className="mt-4 w-full rounded bg-emerald-800 px-4 py-3 text-sm font-bold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-zinc-400">
+                  Record sale & print receipt
+                </button>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {user?.role === 'restaurant' && showMerchantMenu && (
           <div className="mb-10 rounded-[28px] border border-zinc-200 bg-white p-5 shadow-sm sm:p-6">
             <div className="mb-6 flex items-center justify-between">
               <div>
@@ -1041,20 +1470,42 @@ export function RestaurantApp() {
           </div>
         )}
 
-        {user?.role === 'restaurant' && (
+        {user?.role === 'restaurant' && showMerchantMenu && (
           <section id="merchant-menu" className="mb-10">
             <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
               <div>
                 <p className="text-sm font-semibold uppercase text-emerald-700">Published menu</p>
                 <h2 className="mt-1 text-2xl font-black">Your dishes</h2>
               </div>
-              <span className="text-sm text-zinc-500">{menu.length} items</span>
+              <span className="text-sm text-zinc-500">{filteredMenu.length} of {menu.length} items</span>
             </div>
+            <form
+              role="search"
+              onSubmit={(event) => {
+                event.preventDefault();
+                setMenuSearchTerm(menuSearchDraft.trim());
+              }}
+              className="mb-4 flex max-w-xl gap-2"
+            >
+              <input
+                value={menuSearchDraft}
+                onChange={(event) => setMenuSearchDraft(event.target.value)}
+                placeholder="Search dishes, descriptions, or codes"
+                aria-label="Search published menu"
+                className="min-w-0 flex-1 rounded border border-zinc-300 bg-white px-3 py-2.5 outline-none focus:border-emerald-700"
+              />
+              <button type="submit" className="rounded bg-zinc-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-zinc-700">Search</button>
+              {menuSearchTerm && (
+                <button type="button" onClick={() => { setMenuSearchDraft(''); setMenuSearchTerm(''); }} className="rounded border border-zinc-300 px-3 py-2.5 text-sm font-semibold hover:bg-zinc-100">Clear</button>
+              )}
+            </form>
             {menu.length === 0 ? (
               <p className="bg-white px-5 py-8 text-sm text-zinc-600">Your menu is empty. Add a dish above to publish it to customers.</p>
+            ) : filteredMenu.length === 0 ? (
+              <p className="border border-dashed border-zinc-300 bg-white px-5 py-8 text-sm text-zinc-600">No published dishes match this search.</p>
             ) : (
               <div className="divide-y divide-zinc-200 bg-white">
-                {menu.map((item) => {
+                {filteredMenu.map((item) => {
                   const isEditing = editingMenuItemId === item.id;
                   const salePrice = Math.round(item.price * (1 - item.discountPercent / 100) * 100) / 100;
                   return (
@@ -1120,7 +1571,7 @@ export function RestaurantApp() {
           </section>
         )}
 
-        {user && activeRole === 'user' && userOrderHistory.length > 0 && (
+        {user?.role === 'user' && showCustomerHistory && (
           <div className="mb-10 rounded-[28px] border border-zinc-200 bg-white p-5 shadow-sm sm:p-6">
             <div className="mb-6 flex items-center justify-between">
               <div>
@@ -1129,7 +1580,9 @@ export function RestaurantApp() {
               </div>
             </div>
 
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {userOrderHistory.length === 0 ? (
+              <p className="border border-dashed border-zinc-300 px-5 py-8 text-sm text-zinc-600">Your order history is empty.</p>
+            ) : <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
               {userOrderHistory.map((order) => (
                 <div key={order.id} className="rounded-[22px] border border-zinc-200 bg-zinc-50 p-4">
                   <div className="mb-2 flex items-center justify-between">
@@ -1153,11 +1606,11 @@ export function RestaurantApp() {
                   </button>
                 </div>
               ))}
-            </div>
+            </div>}
           </div>
         )}
 
-        {isConsumer && (
+        {isConsumer && showCustomerDiscover && (
         <div id="featured" className="mb-10">
           <div className="mb-6">
             <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
@@ -1249,59 +1702,83 @@ export function RestaurantApp() {
           ) : (
             <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-4">
               {filteredRestaurants.map((restaurant) => (
-              <button
+              <article
                 key={restaurant.id}
-                onClick={() => setSelectedRestaurantId(restaurant.id)}
-                className={`group overflow-hidden rounded-[26px] border bg-white text-left shadow-sm transition hover:-translate-y-1 hover:shadow-xl ${
+                className={`overflow-hidden rounded-[26px] border bg-white shadow-sm ${
                   selectedRestaurantId === restaurant.id
                     ? 'border-orange-300 ring-2 ring-orange-200'
                     : 'border-zinc-200'
                 }`}
               >
-                <div className="relative grid h-44 place-items-center overflow-hidden bg-zinc-100">
-                  {restaurant.image ? (
-                    <img src={restaurant.image} alt={restaurant.name} className="h-full w-full object-cover transition duration-500 group-hover:scale-105" />
-                  ) : (
-                    <span className="text-sm text-zinc-500">Photo not provided</span>
-                  )}
-                  {restaurant.tag && <span className="absolute left-4 top-4 rounded-full bg-white/90 px-3 py-1 text-xs font-bold text-orange-700">{restaurant.tag}</span>}
-                </div>
-                <div className="space-y-3 p-4">
-                  <div className="flex items-start justify-between gap-4">
+                <button type="button" onClick={() => setSelectedRestaurantId(restaurant.id)} aria-label={`View menu for ${restaurant.name}`} className="group block w-full text-left">
+                  <div className="relative grid h-44 place-items-center overflow-hidden bg-zinc-100">
+                    {restaurant.image ? (
+                      <img src={restaurant.image} alt={restaurant.name} className="h-full w-full object-cover transition duration-500 group-hover:scale-105" />
+                    ) : (
+                      <span className="text-sm text-zinc-500">Photo not provided</span>
+                    )}
+                    {restaurant.tag && <span className="absolute left-4 top-4 rounded-full bg-white/90 px-3 py-1 text-xs font-bold text-orange-700">{restaurant.tag}</span>}
+                  </div>
+                  <div className="space-y-3 p-4">
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <h3 className="text-xl font-black tracking-tight">{restaurant.name}</h3>
+                        <p className="mt-1 text-sm text-zinc-500">{restaurant.cuisine}</p>
+                      </div>
+                      <div className="rounded-full bg-zinc-100 px-2 py-1 text-xs font-bold text-zinc-700">
+                        {restaurant.reviews > 0 ? `★ ${restaurant.rating.toFixed(1)}` : 'Not rated'}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between text-sm text-zinc-600">
+                      <span>{restaurant.deliveryTime}</span>
+                      <span>{restaurant.reviews.toLocaleString()} reviews</span>
+                    </div>
+
+                    <div className="flex items-center justify-between border-t border-zinc-100 pt-3">
+                      <span className="font-semibold text-zinc-800">{restaurant.offersDelivery ? `Delivery · $${restaurant.fee.toFixed(2)}` : 'Dine-in'}</span>
+                      <span className="text-orange-600">View menu</span>
+                    </div>
+                  </div>
+                </button>
+                {user?.role === 'user' && (
+                  <div className="flex items-center justify-between gap-3 border-t border-zinc-200 px-4 py-3">
                     <div>
-                      <h3 className="text-xl font-black tracking-tight">{restaurant.name}</h3>
-                      <p className="mt-1 text-sm text-zinc-500">{restaurant.cuisine}</p>
+                      <p className="text-xs font-semibold text-zinc-700">{restaurant.myRating ? `Your rating: ${restaurant.myRating}/5` : 'Rate this restaurant'}</p>
+                      {restaurantRatingMessages[restaurant.id] && <p className="mt-1 text-xs text-emerald-800" role="status">{restaurantRatingMessages[restaurant.id]}</p>}
                     </div>
-                    <div className="rounded-full bg-zinc-100 px-2 py-1 text-xs font-bold text-zinc-700">
-                      {restaurant.reviews > 0 ? `★ ${restaurant.rating}` : 'Not rated'}
+                    <div role="group" aria-label={`Rate ${restaurant.name}`} className="flex gap-1">
+                      {[1, 2, 3, 4, 5].map((rating) => (
+                        <button
+                          key={rating}
+                          type="button"
+                          aria-label={`Rate ${rating} out of 5 stars`}
+                          aria-pressed={restaurant.myRating === rating}
+                          disabled={savingRatingRestaurantId === restaurant.id}
+                          onClick={() => void handleRateRestaurant(restaurant.id, rating)}
+                          className={`h-9 w-8 text-lg disabled:cursor-wait ${rating <= (restaurant.myRating || 0) ? 'text-amber-600' : 'text-zinc-400'} hover:text-amber-700`}
+                        >
+                          ★
+                        </button>
+                      ))}
                     </div>
                   </div>
-
-                  <div className="flex items-center justify-between text-sm text-zinc-600">
-                    <span>{restaurant.deliveryTime}</span>
-                    <span>{restaurant.reviews.toLocaleString()} reviews</span>
-                  </div>
-
-                  <div className="flex items-center justify-between border-t border-zinc-100 pt-3">
-                    <span className="font-semibold text-zinc-800">{restaurant.offersDelivery ? `Delivery · $${restaurant.fee.toFixed(2)}` : 'Dine-in'}</span>
-                    <span className="text-orange-600">View menu</span>
-                  </div>
-                </div>
-              </button>
+                )}
+              </article>
               ))}
             </div>
           )}
         </div>
         )}
 
-        {isConsumer && (
+        {isConsumer && showCustomerMenu && (
         <div id="restaurants" className="grid gap-8 lg:grid-cols-[1.2fr_0.8fr]">
           <section className="rounded-[28px] border border-zinc-200 bg-white p-5 shadow-sm sm:p-6">
             <div className="mb-6 flex items-center justify-between">
               <div>
                 <p className="text-sm font-semibold uppercase tracking-[0.2em] text-orange-600">Menu</p>
                 <h2 className="mt-2 text-3xl font-black tracking-tight">
-                  {selectedRestaurant?.name ?? 'Restaurant menu'}
+                  All available food
                 </h2>
               </div>
               <div className="rounded-full bg-orange-50 px-3 py-2 text-sm font-semibold text-orange-700">
@@ -1309,16 +1786,47 @@ export function RestaurantApp() {
               </div>
             </div>
 
+            <form
+              role="search"
+              onSubmit={(event) => {
+                event.preventDefault();
+                setSearch(menuRestaurantSearch.trim());
+              }}
+              className="mb-4 flex flex-wrap gap-2"
+            >
+              <input
+                value={menuRestaurantSearch}
+                onChange={(event) => setMenuRestaurantSearch(event.target.value)}
+                placeholder="Search restaurants, cuisine, or dishes"
+                aria-label="Search restaurants and dishes"
+                className="min-w-0 flex-1 rounded border border-zinc-300 px-3 py-2.5 outline-none focus:border-orange-500"
+              />
+              <button type="submit" className="rounded bg-zinc-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-zinc-700">Search</button>
+              {search && (
+                <button type="button" onClick={() => { setSearch(''); setMenuRestaurantSearch(''); }} className="rounded border border-zinc-300 px-3 py-2.5 text-sm font-semibold hover:bg-zinc-100">Clear</button>
+              )}
+            </form>
+
+            <label className="mb-5 grid gap-1 text-sm font-semibold text-zinc-700">
+              Filter by restaurant
+              <select value={menuRestaurantFilter} onChange={(event) => setMenuRestaurantFilter(event.target.value)} className="w-full rounded border border-zinc-300 bg-white px-3 py-2.5">
+                <option value="all">All restaurants</option>
+                {catalogRestaurants.map((restaurant) => <option key={restaurant.id} value={restaurant.id}>{restaurant.name}</option>)}
+              </select>
+            </label>
+
             {status && <p className="mb-4 text-sm text-zinc-500">{status}</p>}
 
-            {menu.length === 0 ? (
+            {visibleCatalogMenu.length === 0 ? (
               <p className="border border-dashed border-zinc-300 px-5 py-8 text-sm text-zinc-600">
-                This restaurant has not published any dishes yet.
+                {catalogMenu.length === 0 ? 'No published dishes are available yet.' : 'No dishes match this search and restaurant filter.'}
               </p>
             ) : (
             <div className="grid gap-4">
-              {menu.map((item) => (
-                <article key={item.id} className="flex flex-col gap-4 rounded-[26px] border border-zinc-200 p-3 sm:flex-row">
+              {visibleCatalogMenu.map((item) => {
+                const restaurant = catalogRestaurants.find((entry) => entry.id === item.restaurantId);
+                const basketQuantity = cart.find((entry) => entry.id === item.id)?.quantity ?? 0;
+                return <article key={item.id} className="flex flex-col gap-4 rounded-[26px] border border-zinc-200 p-3 sm:flex-row">
                   {item.image ? (
                     <img src={item.image} alt={item.name} className="h-28 w-full rounded-[20px] object-cover sm:w-36" />
                   ) : (
@@ -1327,6 +1835,7 @@ export function RestaurantApp() {
                   <div className="flex flex-1 flex-col justify-between gap-3">
                     <div className="flex items-start justify-between gap-4">
                       <div>
+                        <p className="mb-1 text-xs font-bold uppercase text-orange-700">{restaurant?.name || 'Restaurant'}</p>
                         <div className="mb-2 flex flex-wrap items-center gap-2 text-[10px] font-bold uppercase tracking-[0.12em]">
                           {item.popular && <span className="rounded-full bg-orange-100 px-2 py-1 text-orange-700">Popular</span>}
                           {item.veg && <span className="rounded-full bg-emerald-100 px-2 py-1 text-emerald-700">Veg</span>}
@@ -1353,16 +1862,17 @@ export function RestaurantApp() {
                         {item.stockQuantity > 0 ? `${item.stockQuantity} available` : 'Out of stock'}
                       </span>
                       <button
+                        type="button"
                         onClick={() => handleAddToCart(item)}
-                        disabled={item.stockQuantity === 0 || (cart.find((entry) => entry.id === item.id)?.quantity ?? 0) >= item.stockQuantity}
+                        disabled={item.stockQuantity === 0 || basketQuantity >= item.stockQuantity}
                         className="rounded-full bg-zinc-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-orange-600 disabled:cursor-not-allowed disabled:bg-zinc-300"
                       >
-                        {item.stockQuantity === 0 ? 'Unavailable' : (cart.find((entry) => entry.id === item.id)?.quantity ?? 0) >= item.stockQuantity ? 'Stock in basket' : 'Add to cart'}
+                        {item.stockQuantity === 0 ? 'Unavailable' : basketQuantity >= item.stockQuantity ? 'Stock in basket' : 'Add to cart'}
                       </button>
                     </div>
                   </div>
-                </article>
-              ))}
+                </article>;
+              })}
             </div>
             )}
           </section>
@@ -1388,13 +1898,23 @@ export function RestaurantApp() {
                   <div key={item.id} className="flex items-center justify-between rounded-2xl bg-zinc-50 p-3">
                     <div>
                       <p className="font-semibold">{item.name}</p>
+                      <p className="text-xs font-semibold text-orange-700">{catalogRestaurants.find((restaurant) => restaurant.id === item.restaurantId)?.name || 'Restaurant'}</p>
                       <p className="text-xs text-zinc-500">Qty {item.quantity} • {item.code || `FOOD-${item.id}`}</p>
                     </div>
-                    <p className="font-black text-zinc-900">${(discountedPrice(item) * item.quantity).toFixed(2)}</p>
+                    <div className="flex items-center gap-3">
+                      <p className="font-black text-zinc-900">${(discountedPrice(item) * item.quantity).toFixed(2)}</p>
+                      <button type="button" onClick={() => setCart((current) => current.filter((entry) => entry.id !== item.id))} aria-label={`Remove ${item.name} from basket`} className="rounded border border-zinc-300 px-2 py-1 text-xs font-semibold text-zinc-700 hover:bg-zinc-100">Remove</button>
+                    </div>
                   </div>
                 ))
               )}
             </div>
+
+            {cartRestaurantIds.length > 1 && (
+              <p className="mt-4 border-l-2 border-orange-500 bg-orange-50 px-3 py-2 text-sm text-orange-900">
+                Your checkout will create orders with {cartRestaurantIds.length} restaurants.
+              </p>
+            )}
 
             <div className="mt-6 space-y-3 border-t border-zinc-200 pt-5 text-sm text-zinc-600">
               <div className="flex justify-between">
@@ -1431,86 +1951,296 @@ export function RestaurantApp() {
         </div>
         )}
 
-        {isConsumer && (
-        <section id="reservations" className="mt-10 rounded-[28px] border border-zinc-200 bg-white p-5 shadow-sm sm:p-6">
-          <div className="mb-6 flex items-center justify-between">
-            <div>
-              <p className="text-sm font-semibold uppercase tracking-[0.2em] text-orange-600">Reservations</p>
-              <h2 className="mt-2 text-3xl font-black tracking-tight">Book a table</h2>
-            </div>
-          </div>
-
-          <form onSubmit={handleReservation} className="grid gap-4 md:grid-cols-2">
-            <div className="md:col-span-2">
-              <label className="mb-2 block text-sm font-semibold text-zinc-700">Guest name</label>
-              <input
-                value={reservationForm.name}
-                onChange={(event) => setReservationForm((current) => ({ ...current, name: event.target.value }))}
-                placeholder="Your name"
-                className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 outline-none focus:border-orange-400"
-              />
-            </div>
-
-            <div>
-              <label className="mb-2 block text-sm font-semibold text-zinc-700">Date</label>
-              <input
-                type="date"
-                value={reservationForm.date}
-                onChange={(event) => setReservationForm((current) => ({ ...current, date: event.target.value }))}
-                className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 outline-none focus:border-orange-400"
-              />
-            </div>
-
-            <div>
-              <label className="mb-2 block text-sm font-semibold text-zinc-700">Time</label>
-              <input
-                type="time"
-                value={reservationForm.time}
-                onChange={(event) => setReservationForm((current) => ({ ...current, time: event.target.value }))}
-                className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 outline-none focus:border-orange-400"
-              />
-            </div>
-
-            <div>
-              <label className="mb-2 block text-sm font-semibold text-zinc-700">Guests</label>
-              <select
-                value={reservationForm.guests}
-                onChange={(event) => setReservationForm((current) => ({ ...current, guests: event.target.value }))}
-                className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 outline-none focus:border-orange-400"
-              >
-                <option>2 Guests</option>
-                <option>4 Guests</option>
-                <option>6 Guests</option>
-                <option>8 Guests</option>
-              </select>
-            </div>
-
-            <div>
-              <label className="mb-2 block text-sm font-semibold text-zinc-700">Table type</label>
-              <select
-                value={reservationForm.tableType}
-                onChange={(event) => setReservationForm((current) => ({ ...current, tableType: event.target.value }))}
-                className="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 outline-none focus:border-orange-400"
-              >
-                <option>Window</option>
-                <option>Patio</option>
-                <option>Booth</option>
-                <option>Private</option>
-              </select>
-            </div>
-
-            <div className="md:col-span-2 flex flex-col gap-3">
-              <button type="submit" className="w-full rounded-full bg-zinc-900 px-5 py-3 text-sm font-bold text-white transition hover:bg-orange-600">
-                Confirm reservation
-              </button>
-              {reservationMessage && (
-                <div className="rounded-2xl bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700">
-                  {reservationMessage}
-                </div>
+        {((isConsumer && showCustomerReservations) || (user?.role === 'restaurant' && showMerchantSeating)) && (
+          <section id="reservations" className="mt-10 border-y border-zinc-200 bg-white px-5 py-6 sm:px-6">
+            <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
+              <div>
+                <p className="text-xs font-bold uppercase text-orange-700">{user?.role === 'restaurant' ? 'Seating & walk-ins' : 'Reservations'}</p>
+                <h2 className="mt-1 text-2xl font-black">{user?.role === 'restaurant' ? 'Table book' : 'Book a table'}</h2>
+                <p className="mt-1 text-sm text-zinc-600">{reservationRestaurant?.name || 'Choose a restaurant'}</p>
+              </div>
+              {reservationAvailability && reservationForm.date && reservationForm.time && (
+                <p className="text-sm font-semibold text-emerald-800" aria-live="polite">
+                  {reservationAvailability.availableCount} of {reservationAvailability.totalCount} seats available
+                </p>
               )}
             </div>
-          </form>
-        </section>
+
+            {isConsumer && (
+              <div className="mb-6 border-b border-zinc-200 pb-5">
+                <label className="grid max-w-xl gap-1 text-sm font-semibold text-zinc-700">
+                  Search dine-in restaurants
+                  <input
+                    value={reservationRestaurantSearch}
+                    onChange={(event) => setReservationRestaurantSearch(event.target.value)}
+                    placeholder="Restaurant name or cuisine"
+                    className="w-full rounded border border-zinc-300 bg-white px-3 py-2.5 outline-none focus:border-orange-500"
+                  />
+                </label>
+                {matchingReservationRestaurants.length > 0 ? (
+                  <div className="mt-3 grid max-h-48 gap-2 overflow-y-auto sm:grid-cols-2 lg:grid-cols-3">
+                    {matchingReservationRestaurants.map((restaurant) => {
+                      const selected = restaurant.id === reservationRestaurantId;
+                      return (
+                        <button
+                          key={restaurant.id}
+                          type="button"
+                          aria-pressed={selected}
+                          onClick={() => {
+                            setReservationSelectedRestaurantId(restaurant.id);
+                            setSelectedSeatNumbers([]);
+                            setReservationAvailability(null);
+                            setReservationMessage('');
+                          }}
+                          className={`border px-3 py-2 text-left ${selected ? 'border-emerald-700 bg-emerald-50' : 'border-zinc-300 bg-white hover:border-orange-500'}`}
+                        >
+                          <span className="block text-sm font-semibold">{restaurant.name}</span>
+                          <span className="text-xs text-zinc-600">{restaurant.cuisine}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="mt-3 text-sm text-zinc-600">No dine-in restaurants match that search.</p>
+                )}
+              </div>
+            )}
+
+            {user?.role === 'restaurant' && (
+              <div className="mb-6 grid gap-5 border-b border-zinc-200 pb-5 md:grid-cols-2">
+                <form onSubmit={(event) => { event.preventDefault(); void handleSeatCapacityUpdate(); }} className="flex flex-wrap items-end gap-3">
+                  <label className="grid gap-1 text-sm font-semibold text-zinc-700">
+                    Active seats
+                    <input
+                      type="number"
+                      min="0"
+                      max="300"
+                      required
+                      value={seatCapacity}
+                      onChange={(event) => setSeatCapacity(event.target.value)}
+                      className="w-32 rounded border border-zinc-300 bg-white px-3 py-2"
+                    />
+                  </label>
+                  <button type="submit" className="rounded bg-zinc-900 px-4 py-2.5 text-sm font-bold text-white hover:bg-zinc-700">
+                    Update seats
+                  </button>
+                  {seatCapacityMessage && <p className="w-full text-sm text-zinc-700" role="status">{seatCapacityMessage}</p>}
+                </form>
+                <div className="flex flex-wrap items-center gap-3">
+                  <button type="button" onClick={handleSetRestaurantLocation} className="rounded border border-zinc-400 px-4 py-2.5 text-sm font-semibold hover:bg-zinc-100">
+                    Use this device&apos;s location
+                  </button>
+                  <p className="text-sm text-zinc-600" role="status">
+                    {restaurantLocationMessage || (selectedRestaurant?.latitude != null && selectedRestaurant.longitude != null
+                      ? `Saved: ${selectedRestaurant.latitude.toFixed(5)}, ${selectedRestaurant.longitude.toFixed(5)}`
+                      : 'Location not set')}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            <form onSubmit={handleReservation} className="grid gap-4 md:grid-cols-2">
+              <label className="grid gap-1 text-sm font-semibold text-zinc-700">
+                Guest name
+                <input
+                  required
+                  maxLength={150}
+                  value={reservationForm.name}
+                  onChange={(event) => setReservationForm((current) => ({ ...current, name: event.target.value }))}
+                  placeholder={user?.role === 'restaurant' ? 'Walk-in guest' : 'Your name'}
+                  className="w-full rounded border border-zinc-300 bg-white px-3 py-2.5 outline-none focus:border-orange-500"
+                />
+              </label>
+              <label className="grid gap-1 text-sm font-semibold text-zinc-700">
+                Date
+                <input
+                  type="date"
+                  required
+                  value={reservationForm.date}
+                  onChange={(event) => {
+                    setSelectedSeatNumbers([]);
+                    setReservationForm((current) => ({ ...current, date: event.target.value }));
+                  }}
+                  className="w-full rounded border border-zinc-300 bg-white px-3 py-2.5 outline-none focus:border-orange-500"
+                />
+              </label>
+              <label className="grid gap-1 text-sm font-semibold text-zinc-700">
+                Arrival time
+                <input
+                  type="time"
+                  required
+                  value={reservationForm.time}
+                  onChange={(event) => {
+                    setSelectedSeatNumbers([]);
+                    setReservationForm((current) => ({ ...current, time: event.target.value }));
+                  }}
+                  className="w-full rounded border border-zinc-300 bg-white px-3 py-2.5 outline-none focus:border-orange-500"
+                />
+              </label>
+              <label className="grid gap-1 text-sm font-semibold text-zinc-700">
+                Party size
+                <select
+                  value={reservationForm.guests}
+                  onChange={(event) => {
+                    setSelectedSeatNumbers([]);
+                    setReservationForm((current) => ({ ...current, guests: event.target.value }));
+                  }}
+                  className="w-full rounded border border-zinc-300 bg-white px-3 py-2.5"
+                >
+                  {Array.from({ length: 10 }, (_, index) => index + 1).map((count) => (
+                    <option key={count} value={count}>{count} {count === 1 ? 'guest' : 'guests'}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="grid gap-1 text-sm font-semibold text-zinc-700">
+                Seating duration
+                <select
+                  value={reservationForm.duration}
+                  onChange={(event) => {
+                    setSelectedSeatNumbers([]);
+                    setReservationForm((current) => ({ ...current, duration: event.target.value }));
+                  }}
+                  className="w-full rounded border border-zinc-300 bg-white px-3 py-2.5"
+                >
+                  <option value="60">1 hour</option>
+                  <option value="90">1 hour 30 minutes</option>
+                  <option value="120">2 hours</option>
+                  <option value="180">3 hours</option>
+                </select>
+              </label>
+              <label className="grid gap-1 text-sm font-semibold text-zinc-700">
+                Seating area
+                <select
+                  value={reservationForm.tableType}
+                  onChange={(event) => setReservationForm((current) => ({ ...current, tableType: event.target.value }))}
+                  className="w-full rounded border border-zinc-300 bg-white px-3 py-2.5"
+                >
+                  <option>Standard</option>
+                  <option>Window</option>
+                  <option>Patio</option>
+                  <option>Booth</option>
+                  <option>Private</option>
+                </select>
+              </label>
+
+              <div className="md:col-span-2">
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <p className="text-sm font-semibold text-zinc-800">Choose {reservationForm.guests} seats</p>
+                  {reservationForm.date && reservationForm.time && (
+                    <span className="text-xs text-zinc-500">Live availability · refreshes every 12 seconds</span>
+                  )}
+                </div>
+                {!reservationRestaurantId ? (
+                  <p className="border border-dashed border-zinc-300 px-4 py-5 text-sm text-zinc-600">Search for and choose a dine-in restaurant first.</p>
+                ) : !reservationForm.date || !reservationForm.time ? (
+                  <p className="border border-dashed border-zinc-300 px-4 py-5 text-sm text-zinc-600">Choose a date and time to see the seat map.</p>
+                ) : !reservationAvailability ? (
+                  <p className="border border-dashed border-zinc-300 px-4 py-5 text-sm text-zinc-600">Loading seat availability…</p>
+                ) : reservationAvailability.seats.length === 0 ? (
+                  <p className="border border-dashed border-zinc-300 px-4 py-5 text-sm text-zinc-600">No seats are configured for this restaurant yet.</p>
+                ) : (
+                  <div className="grid grid-cols-3 gap-2 sm:grid-cols-5 md:grid-cols-8">
+                    {reservationAvailability.seats.map((seat) => {
+                      const selected = selectedSeatNumbers.includes(seat.number);
+                      return (
+                        <button
+                          key={seat.number}
+                          type="button"
+                          disabled={!seat.available && !selected}
+                          aria-pressed={selected}
+                          onClick={() => setSelectedSeatNumbers((current) => selected
+                            ? current.filter((number) => number !== seat.number)
+                            : current.length < Number(reservationForm.guests) ? [...current, seat.number] : current)}
+                          className={`min-h-16 border px-2 py-2 text-left text-xs font-semibold disabled:cursor-not-allowed ${selected
+                            ? 'border-emerald-700 bg-emerald-700 text-white'
+                            : seat.available
+                              ? 'border-zinc-300 bg-white text-zinc-800 hover:border-emerald-600'
+                              : 'border-rose-200 bg-rose-50 text-rose-800'}`}
+                        >
+                          <span className="block text-sm">Seat {seat.number}</span>
+                          <span>{selected ? 'Selected' : seat.available ? 'Available' : 'Booked'}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <div className="md:col-span-2 flex flex-col gap-3">
+                <button
+                  type="submit"
+                  disabled={!reservationRestaurantId || selectedSeatNumbers.length !== Number(reservationForm.guests)}
+                  className="w-full rounded bg-zinc-900 px-5 py-3 text-sm font-bold text-white hover:bg-orange-700 disabled:cursor-not-allowed disabled:bg-zinc-400"
+                >
+                  {user?.role === 'restaurant' ? 'Record walk-in' : 'Confirm reservation'}
+                </button>
+                {reservationMessage && <p className="text-sm font-medium text-emerald-800" role="status">{reservationMessage}</p>}
+              </div>
+            </form>
+
+            {user?.role === 'restaurant' && reservationAvailability?.reservations.length ? (
+              <div className="mt-8 border-t border-zinc-200 pt-5">
+                <h3 className="mb-3 text-lg font-bold">Bookings for {reservationForm.date}</h3>
+                <div className="divide-y divide-zinc-200">
+                  {reservationAvailability.reservations.map((reservation) => (
+                    <div key={reservation.id} className="flex flex-wrap items-center justify-between gap-3 py-3 text-sm">
+                      <div>
+                        <p className="font-semibold">{reservation.reservation_time.slice(0, 5)} · {reservation.customer_name}</p>
+                        <p className="mt-1 text-zinc-600">Seats {reservation.seats.join(', ')} · {reservation.guests} guests · {reservation.duration_minutes} min · {reservation.source}</p>
+                      </div>
+                      <span className="text-xs font-semibold uppercase text-zinc-600">{reservation.status}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {reservationReceipt && !printedOrder && (
+              <div className="reservation-print mt-6 border border-zinc-300 bg-white p-5">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-bold uppercase text-zinc-500">{user?.role === 'restaurant' ? 'Walk-in receipt' : 'Reservation receipt'}</p>
+                    <h3 className="mt-1 text-xl font-black">{reservationRestaurant?.name}</h3>
+                  </div>
+                  <button type="button" onClick={() => { setPrintedOrder(null); window.print(); }} className="print:hidden rounded border border-zinc-400 px-3 py-2 text-sm font-semibold hover:bg-zinc-100">
+                    Print receipt
+                  </button>
+                </div>
+                <div className="mt-4 grid gap-2 text-sm sm:grid-cols-2">
+                  <p><strong>Booking:</strong> {reservationReceipt.id}</p>
+                  <p><strong>Guest:</strong> {reservationReceipt.name}</p>
+                  <p><strong>Date and time:</strong> {reservationReceipt.date} · {reservationReceipt.time}</p>
+                  <p><strong>Seats:</strong> {reservationReceipt.seats.join(', ')}</p>
+                  <p><strong>Party:</strong> {reservationReceipt.guests} guests</p>
+                  <p><strong>Duration:</strong> {reservationReceipt.duration} minutes</p>
+                </div>
+              </div>
+            )}
+          </section>
+        )}
+
+        {printedOrder && (user?.role !== 'restaurant' || showMerchantOrders) && (
+          <section className="order-print my-8 border border-zinc-300 bg-white p-5">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-bold uppercase text-zinc-500">{printedOrder.status === 'Dine-in' ? 'Walk-in receipt' : 'Delivery order ticket'}</p>
+                <h2 className="mt-1 text-xl font-black">{printedOrder.restaurant}</h2>
+              </div>
+              <div className="print:hidden flex gap-2">
+                <button type="button" onClick={() => window.print()} className="rounded border border-zinc-400 px-3 py-2 text-sm font-semibold hover:bg-zinc-100">Print ticket</button>
+                <button type="button" onClick={() => setPrintedOrder(null)} aria-label="Close ticket" className="rounded border border-zinc-400 px-3 py-2 text-sm font-semibold hover:bg-zinc-100">Close</button>
+              </div>
+            </div>
+            <div className="mt-4 grid gap-2 text-sm sm:grid-cols-2">
+              <p><strong>Order:</strong> {printedOrder.id}</p>
+              <p><strong>Guest:</strong> {printedOrder.customer}</p>
+              <p><strong>Items:</strong> {printedOrder.item}</p>
+              <p><strong>Food codes:</strong> {printedOrder.foodCode || '—'}</p>
+              <p><strong>Total:</strong> ${printedOrder.total.toFixed(2)}</p>
+              <p><strong>Status:</strong> {printedOrder.status}</p>
+              <p><strong>Placed:</strong> {printedOrder.time}</p>
+            </div>
+          </section>
         )}
       </section>
 

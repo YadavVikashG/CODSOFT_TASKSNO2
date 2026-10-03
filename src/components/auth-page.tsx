@@ -34,7 +34,7 @@ export function AuthPage({ mode }: AuthPageProps) {
         throw new Error(data.error || 'Unable to authenticate. Please try again.');
       }
 
-      router.replace('/');
+      router.replace(data.user?.role === 'user' ? '/menu' : '/');
       router.refresh();
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : 'Unable to authenticate. Please try again.');
